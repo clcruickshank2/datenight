@@ -3,12 +3,26 @@
 import { useState } from "react";
 import { submitProfile, submitRestaurants, type ProfileForm, type RestaurantRow } from "./actions";
 
+/** Profile shape from server (arrays); form state uses comma-separated strings. */
+type ServerProfile = {
+  display_name: string;
+  party_size: number;
+  time_window_start: string;
+  time_window_end: string;
+  neighborhoods: string[];
+  price_min: number;
+  price_max: number;
+  vibe_tags: string[];
+  hard_nos: string[];
+  timezone: string;
+};
+
 type Props = {
-  profile: ProfileForm & { neighborhoods: string[]; vibe_tags: string[]; hard_nos: string[] };
+  profile: ServerProfile;
   existingRestaurantCount: number;
 };
 
-function profileToForm(profile: Props["profile"]): Record<keyof ProfileForm, string | number> {
+function profileToForm(profile: ServerProfile): Record<keyof ProfileForm, string | number> {
   return {
     display_name: profile.display_name,
     party_size: profile.party_size,
