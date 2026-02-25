@@ -355,6 +355,7 @@ export async function extractTrendingRestaurants(
     url: a.url,
   }));
   const refToId = new Map(list.map((a) => [a.ref, a.id]));
+  const idToRef = new Map(list.map((a) => [a.id, a.ref]));
 
   const baseContext = `Input articles (ref, source, title, summary, url):
 ${list.map((a) => `- ref=${a.ref} | source=${a.source} | title="${a.title}" | summary="${a.summary}" | url=${a.url}`).join("\n")}`;
@@ -416,14 +417,28 @@ If unsure, exclude the item.`;
 
     const trimmed = dedupeRestaurantsByName(extracted).slice(0, 15);
     if (trimmed.length > 0) {
-      const enriched = await enrichTrendingRestaurants(trimmed);
-      return {
-        restaurants: enriched.restaurants,
-        method: "llm",
-        extracted_count: trimmed.length,
-        enriched_count: enriched.enrichedCount,
-        error: [extractionError, enriched.error].filter(Boolean).join("; ") || undefined,
-      };
+      const verified = await verifyExtractedRestaurantsWithLlm(
+        trimmed,
+        list,
+        key,
+        refToId,
+        idToRef
+      );
+      if (verified.restaurants.length > 0) {
+        const enriched = await enrichTrendingRestaurants(verified.restaurants);
+        return {
+          restaurants: enriched.restaurants,
+          method: "llm",
+          extracted_count: verified.restaurants.length,
+          enriched_count: enriched.enrichedCount,
+          error: [extractionError, verified.error, enriched.error]
+            .filter(Boolean)
+            .join("; ") || undefined,
+        };
+      }
+      extractionError = [extractionError, verified.error, "Verifier rejected extracted rows"]
+        .filter(Boolean)
+        .join("; ");
     }
 
     // Last LLM rescue pass: ask only for clean restaurant names.
@@ -452,16 +467,33 @@ Return ONLY JSON object:
       .filter((r) => isPlausibleRestaurantName(r.name))
       .slice(0, 15);
     if (namesOnlyRows.length > 0) {
-      const enriched = await enrichTrendingRestaurants(namesOnlyRows);
-      return {
-        restaurants: enriched.restaurants,
-        method: "llm",
-        extracted_count: namesOnlyRows.length,
-        enriched_count: enriched.enrichedCount,
-        error: [extractionError, namesOnly.error, enriched.error]
-          .filter(Boolean)
-          .join("; ") || undefined,
-      };
+      const verified = await verifyExtractedRestaurantsWithLlm(
+        namesOnlyRows,
+        list,
+        key,
+        refToId,
+        idToRef
+      );
+      if (verified.restaurants.length > 0) {
+        const enriched = await enrichTrendingRestaurants(verified.restaurants);
+        return {
+          restaurants: enriched.restaurants,
+          method: "llm",
+          extracted_count: verified.restaurants.length,
+          enriched_count: enriched.enrichedCount,
+          error: [extractionError, namesOnly.error, verified.error, enriched.error]
+            .filter(Boolean)
+            .join("; ") || undefined,
+        };
+      }
+      extractionError = [
+        extractionError,
+        namesOnly.error,
+        verified.error,
+        "Verifier rejected names-only rows",
+      ]
+        .filter(Boolean)
+        .join("; ");
     }
 
     const fallbackBase = heuristicTrendingRestaurants(articles);
@@ -471,14 +503,37 @@ Return ONLY JSON object:
       source_article_ids: r.source_article_ids,
     }));
     if (fallback.length > 0) {
-      const enrichedFallback = await enrichTrendingRestaurants(fallback);
+      const verifiedFallback = await verifyExtractedRestaurantsWithLlm(
+        fallback,
+        list,
+        key,
+        refToId,
+        idToRef
+      );
+      if (verifiedFallback.restaurants.length === 0) {
+        return {
+          restaurants: [],
+          method: "heuristic",
+          extracted_count: 0,
+          enriched_count: 0,
+          error: [
+            extractionError || "LLM returned empty extraction; used heuristic fallback",
+            verifiedFallback.error,
+            "Verifier rejected fallback rows",
+          ]
+            .filter(Boolean)
+            .join("; "),
+        };
+      }
+      const enrichedFallback = await enrichTrendingRestaurants(verifiedFallback.restaurants);
       return {
         restaurants: enrichedFallback.restaurants,
         method: "heuristic",
-        extracted_count: fallback.length,
+        extracted_count: verifiedFallback.restaurants.length,
         enriched_count: enrichedFallback.enrichedCount,
         error: [
           extractionError || "LLM returned empty extraction; used heuristic fallback",
+          verifiedFallback.error,
           enrichedFallback.error,
         ]
           .filter(Boolean)
@@ -585,6 +640,117 @@ async function runRestaurantExtractionAttempt(
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown extraction error";
     return { restaurants: [], error: message };
+  }
+}
+
+async function verifyExtractedRestaurantsWithLlm(
+  rows: ExtractedTrendingRestaurant[],
+  articleRefs: {
+    ref: string;
+    id: string;
+    source: string;
+    title: string;
+    summary: string;
+    url: string;
+  }[],
+  key: string,
+  refToId: Map<string, string>,
+  idToRef: Map<string, string>
+): Promise<{ restaurants: ExtractedTrendingRestaurant[]; error?: string }> {
+  if (rows.length === 0) return { restaurants: [] };
+  const context = articleRefs
+    .map(
+      (a) =>
+        `- ref=${a.ref} | source=${a.source} | title="${a.title}" | summary="${a.summary}" | url=${a.url}`
+    )
+    .join("\n");
+  const candidates = rows
+    .map((r) => ({
+      name: r.name,
+      overview: r.overview,
+      article_refs: r.source_article_ids
+        .map((id) => idToRef.get(id))
+        .filter((v): v is string => Boolean(v)),
+    }))
+    .slice(0, 20);
+  const prompt = `You are a strict verifier for restaurant extraction from article text.
+
+Articles:
+${context}
+
+Candidate restaurants:
+${JSON.stringify(candidates)}
+
+Task:
+- Keep only candidates that are clearly real restaurant names explicitly present in the article content.
+- Reject navigation text, newsletter/signup phrases, and generic headings.
+- Ensure article_refs only contains valid refs where the restaurant is actually mentioned.
+- Return each kept restaurant once.
+
+Return ONLY JSON object:
+{
+  "restaurants": [
+    { "name": "Restaurant Name", "overview": "short overview", "article_refs": ["A1"] }
+  ]
+}`;
+
+  try {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0,
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      return { restaurants: rows, error: `Verifier OpenAI ${res.status}: ${text}` };
+    }
+    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    const content = data.choices?.[0]?.message?.content?.trim();
+    if (!content) return { restaurants: rows, error: "Verifier missing content; kept unverified rows" };
+
+    const parsed = extractRestaurantsFromModelContent(content);
+    const verified = dedupeRestaurantsByName(
+      parsed
+        .map((r) => {
+          const name = (r.name ?? "").trim();
+          const overview = (r.overview ?? "").trim();
+          const refs = Array.isArray(r.article_refs)
+            ? r.article_refs
+                .map((ref) => (typeof ref === "string" ? ref.trim().toUpperCase() : ""))
+                .filter((ref) => refToId.has(ref))
+            : [];
+          const ids = refs
+            .map((ref) => refToId.get(ref))
+            .filter((id): id is string => Boolean(id));
+          return {
+            name,
+            overview: overview || "Mentioned in this week's curated Denver food coverage.",
+            source_article_ids: ids,
+          };
+        })
+        .filter(
+          (r) =>
+            r.name.length > 0 &&
+            isPlausibleRestaurantName(r.name) &&
+            r.source_article_ids.length > 0
+        )
+    ).slice(0, 15);
+
+    if (verified.length === 0) {
+      return { restaurants: [], error: "Verifier rejected all candidate rows" };
+    }
+
+    return { restaurants: verified };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : "Unknown verifier error";
+    return { restaurants: rows, error: `${message}; kept unverified rows` };
   }
 }
 

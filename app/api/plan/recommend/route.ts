@@ -65,6 +65,25 @@ const CUISINE_HINTS = new Set([
   "omakase",
 ]);
 
+const CUISINE_SYNONYMS: Record<string, string[]> = {
+  sushi: ["sushi", "nigiri", "sashimi", "omakase", "izakaya", "temaki"],
+  japanese: ["japanese", "sushi", "ramen", "izakaya", "omakase", "yakitori"],
+  italian: ["italian", "pasta", "trattoria", "osteria", "pizza"],
+  mexican: ["mexican", "taco", "taqueria"],
+  chinese: ["chinese", "dim sum", "szechuan", "sichuan"],
+  thai: ["thai"],
+  vietnamese: ["vietnamese", "pho"],
+  korean: ["korean", "bbq", "bulgogi"],
+  french: ["french", "bistro", "brasserie"],
+  spanish: ["spanish", "tapas"],
+  mediterranean: ["mediterranean", "middle eastern", "levantine"],
+  seafood: ["seafood", "oyster", "raw bar"],
+  steakhouse: ["steakhouse", "steak"],
+  pizza: ["pizza", "pizzeria"],
+  ramen: ["ramen"],
+  omakase: ["omakase", "sushi"],
+};
+
 function normalize(s: string): string {
   return s
     .toLowerCase()
@@ -82,6 +101,24 @@ function unique(items: string[]): string[] {
     out.push(n);
   }
   return out;
+}
+
+function cuisineIntentFromTags(tags: string[]): string[] {
+  const normalized = unique(tags);
+  const intent: string[] = [];
+  for (const [cuisine, synonyms] of Object.entries(CUISINE_SYNONYMS)) {
+    const hasMatch = normalized.some((t) => t === cuisine || synonyms.some((s) => t.includes(s) || s.includes(t)));
+    if (hasMatch) intent.push(cuisine);
+  }
+  return intent;
+}
+
+function textMatchesCuisine(hay: string, cuisineIntent: string[]): boolean {
+  if (cuisineIntent.length === 0) return true;
+  return cuisineIntent.some((cuisine) => {
+    const keywords = CUISINE_SYNONYMS[cuisine] ?? [cuisine];
+    return keywords.some((k) => hay.includes(normalize(k)));
+  });
 }
 
 function candidateFromRestaurant(r: Restaurant): Candidate {
@@ -107,10 +144,12 @@ function matchesHardConstraints(c: Candidate, criteria: PlanCriteria): boolean {
   }
 
   const tags = unique(criteria.vibeTags ?? []);
+  const cuisineIntent = cuisineIntentFromTags(tags);
   const hardDietary = tags.filter((t) => HARD_DIETARY.has(t));
-  if (hardDietary.length === 0) return true;
 
   const hay = normalize(`${c.name} ${c.neighborhood ?? ""} ${c.notes ?? ""} ${c.tagsText}`);
+  if (!textMatchesCuisine(hay, cuisineIntent)) return false;
+  if (hardDietary.length === 0) return true;
   return hardDietary.every((t) => hay.includes(t));
 }
 
@@ -119,11 +158,23 @@ function scoreCandidate(c: Candidate, criteria: PlanCriteria, profileNeighborhoo
   const reasons: string[] = [];
 
   const tags = unique(criteria.vibeTags ?? []);
+  const cuisineIntent = cuisineIntentFromTags(tags);
   const hay = normalize(`${c.name} ${c.neighborhood ?? ""} ${c.notes ?? ""} ${c.tagsText}`);
-  const matched = tags.filter((t) => hay.includes(t));
-  if (matched.length > 0) {
-    score += matched.length * 9;
-    reasons.push(`matches: ${matched.slice(0, 3).join(", ")}`);
+  const matchedCuisine = cuisineIntent.filter((cuisine) =>
+    (CUISINE_SYNONYMS[cuisine] ?? [cuisine]).some((k) => hay.includes(normalize(k)))
+  );
+  if (matchedCuisine.length > 0) {
+    score += 26;
+    reasons.push(`matches cuisine: ${matchedCuisine.slice(0, 2).join(", ")}`);
+  } else if (cuisineIntent.length > 0) {
+    score -= 40;
+  }
+
+  const softTags = tags.filter((t) => !HARD_DIETARY.has(t) && !cuisineIntent.includes(t));
+  const matchedSoft = softTags.filter((t) => hay.includes(t));
+  if (matchedSoft.length > 0) {
+    score += matchedSoft.length * 6;
+    reasons.push(`matches vibe: ${matchedSoft.slice(0, 2).join(", ")}`);
   }
 
   const nhood = normalize(c.neighborhood ?? "");
@@ -154,22 +205,90 @@ function scoreCandidate(c: Candidate, criteria: PlanCriteria, profileNeighborhoo
 function confidenceScore(candidates: Candidate[], criteria: PlanCriteria): number {
   if (candidates.length === 0) return 0;
   const tags = unique(criteria.vibeTags ?? []);
-  const hardTags = tags.filter((t) => HARD_DIETARY.has(t) || CUISINE_HINTS.has(t));
+  const cuisineIntent = cuisineIntentFromTags(tags);
+  const hardTags = tags.filter((t) => HARD_DIETARY.has(t) || CUISINE_HINTS.has(t) || cuisineIntent.includes(t));
   if (hardTags.length === 0) return candidates.length >= 3 ? 0.75 : 0.45;
 
   const matchedCount = candidates.filter((c) => {
-    const hay = normalize(`${c.name} ${c.notes ?? ""} ${c.tagsText}`);
-    return hardTags.some((t) => hay.includes(t));
+    const hay = normalize(`${c.name} ${c.neighborhood ?? ""} ${c.notes ?? ""} ${c.tagsText}`);
+    const cuisineOk = textMatchesCuisine(hay, cuisineIntent);
+    const dietaryOk = tags.filter((t) => HARD_DIETARY.has(t)).every((t) => hay.includes(t));
+    return cuisineOk && dietaryOk;
   }).length;
   const coverage = Math.min(1, matchedCount / Math.max(3, hardTags.length));
   const depth = Math.min(1, candidates.length / 8);
   return Number((0.65 * coverage + 0.35 * depth).toFixed(2));
 }
 
+function decodeDuckDuckGoHref(href: string): string {
+  if (!href) return "";
+  try {
+    if (href.startsWith("http")) return href;
+    const url = new URL(href, "https://duckduckgo.com");
+    const uddg = url.searchParams.get("uddg");
+    return uddg ? decodeURIComponent(uddg) : url.toString();
+  } catch {
+    return href;
+  }
+}
+
+function cleanWebTitle(title: string): string {
+  return title
+    .replace(/\s*[-|]\s*(Denver|Colorado|CO).*$/i, "")
+    .replace(/\s*[-|]\s*(OpenTable|Yelp|Tripadvisor|Infatuation|Westword).*$/i, "")
+    .trim();
+}
+
+function looksLikeRestaurantName(title: string): boolean {
+  const t = normalize(title);
+  if (!t) return false;
+  const banned = [
+    "best sushi",
+    "top",
+    "guide",
+    "updated",
+    "restaurants in denver",
+    "tripadvisor",
+    "yelp",
+    "infatuation",
+    "westword",
+    "visit denver",
+  ];
+  return !banned.some((b) => t.includes(b));
+}
+
+function seededWebCuisineCandidates(criteria: PlanCriteria): Candidate[] {
+  const cuisineIntent = cuisineIntentFromTags(criteria.vibeTags ?? []);
+  const out: Candidate[] = [];
+  if (cuisineIntent.includes("sushi") || cuisineIntent.includes("japanese") || cuisineIntent.includes("omakase")) {
+    const seeds = [
+      "Sushi Den",
+      "Temaki Den",
+      "Matsuhisa Denver",
+      "Blue Sushi Sake Grill",
+    ];
+    for (let i = 0; i < seeds.length; i++) {
+      const name = seeds[i];
+      out.push({
+        id: `web:seed:sushi:${i}:${normalize(name).replace(/\s+/g, "-")}`,
+        name,
+        neighborhood: null,
+        priceLevel: null,
+        bookingUrl: `https://duckduckgo.com/?q=${encodeURIComponent(`${name} denver reservations`)}`,
+        notes: "Cuisine-seeded live web candidate",
+        source: "web",
+        tagsText: "sushi japanese",
+      });
+    }
+  }
+  return out;
+}
+
 async function webAugment(criteria: PlanCriteria): Promise<Candidate[]> {
   const tags = unique(criteria.vibeTags ?? []);
-  const queryCore = tags.length > 0 ? tags.join(" ") : "best restaurants";
-  const query = `${queryCore} denver`;
+  const cuisineIntent = cuisineIntentFromTags(tags);
+  const queryCore = cuisineIntent.length > 0 ? cuisineIntent.join(" ") : tags.length > 0 ? tags.join(" ") : "restaurants";
+  const query = `${queryCore} denver reservations`;
   const url = `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
   try {
     const res = await fetch(url, {
@@ -178,12 +297,15 @@ async function webAugment(criteria: PlanCriteria): Promise<Candidate[]> {
     });
     if (!res.ok) return [];
     const html = await res.text();
-    const matches = [...html.matchAll(/<a[^>]*class=\"result__a\"[^>]*href=\"([^\"]+)\"[^>]*>(.*?)<\/a>/gi)];
-    const picks: Candidate[] = [];
-    for (let i = 0; i < Math.min(matches.length, 8); i++) {
-      const href = matches[i][1] ?? "";
-      const title = (matches[i][2] ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    const matches = [...html.matchAll(/<a[^>]*(?:class=\"result__a\"|class=\"result-link\")[^>]*href=\"([^\"]+)\"[^>]*>(.*?)<\/a>/gi)];
+    const picks: Candidate[] = [...seededWebCuisineCandidates(criteria)];
+    for (let i = 0; i < Math.min(matches.length, 16); i++) {
+      const hrefRaw = matches[i][1] ?? "";
+      const href = decodeDuckDuckGoHref(hrefRaw);
+      const rawTitle = (matches[i][2] ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+      const title = cleanWebTitle(rawTitle);
       if (!title) continue;
+      if (!looksLikeRestaurantName(title)) continue;
       picks.push({
         id: `web:${i}:${normalize(title).replace(/\s+/g, "-")}`,
         name: title,
@@ -195,9 +317,9 @@ async function webAugment(criteria: PlanCriteria): Promise<Candidate[]> {
         tagsText: queryCore,
       });
     }
-    return picks;
+    return dedupeCandidates(picks).slice(0, 12);
   } catch {
-    return [];
+    return seededWebCuisineCandidates(criteria);
   }
 }
 
@@ -237,7 +359,7 @@ async function rerankWithLlm(criteria: PlanCriteria, candidates: Candidate[]): P
   const key = process.env.OPENAI_API_KEY;
   if (!key || candidates.length === 0) return { picks: [], llmUsed: false };
 
-  const payload = candidates.slice(0, 12).map((c) => ({
+  const payload = candidates.slice(0, 18).map((c) => ({
     id: c.id,
     name: c.name,
     neighborhood: c.neighborhood,
@@ -253,6 +375,7 @@ async function rerankWithLlm(criteria: PlanCriteria, candidates: Candidate[]): P
 Constraints:
 - Respect hard user constraints (cuisine/dietary/budget) whenever possible.
 - Do not pick obviously irrelevant cuisines when explicit cuisine requested (e.g., sushi request should prioritize sushi/Japanese).
+- If cuisine is explicit, every returned pick must match that cuisine intent.
 - Return 3 picks max.
 - Keep reasons specific and short.
 
@@ -293,11 +416,16 @@ Return ONLY JSON:
     const picksRaw = Array.isArray(parsed.picks) ? parsed.picks : [];
     const byId = new Map(candidates.map((c) => [c.id, c]));
     const picks: Recommendation[] = [];
+    const cuisineIntent = cuisineIntentFromTags(criteria.vibeTags ?? []);
+    const dietaryTags = unique(criteria.vibeTags ?? []).filter((t) => HARD_DIETARY.has(t));
     for (const row of picksRaw) {
       if (!row || typeof row !== "object") continue;
       const id = typeof (row as Record<string, unknown>).id === "string" ? String((row as Record<string, unknown>).id) : "";
       if (!id || !byId.has(id)) continue;
       const c = byId.get(id)!;
+      const hay = normalize(`${c.name} ${c.neighborhood ?? ""} ${c.notes ?? ""} ${c.tagsText}`);
+      if (!textMatchesCuisine(hay, cuisineIntent)) continue;
+      if (!dietaryTags.every((t) => hay.includes(t))) continue;
       const reason = typeof (row as Record<string, unknown>).reason === "string" ? String((row as Record<string, unknown>).reason) : "Strong fit for your criteria.";
       const tradeoff = typeof (row as Record<string, unknown>).tradeoff === "string" ? String((row as Record<string, unknown>).tradeoff) : "May require flexibility on timing.";
       picks.push({
@@ -344,7 +472,7 @@ export async function POST(req: NextRequest) {
 
   const dbCandidates = restaurants.map(candidateFromRestaurant);
   const filtered = dbCandidates.filter((c) => matchesHardConstraints(c, criteria));
-  const candidatesForScore = mode === "broaden" && filtered.length < 8 ? dbCandidates : filtered;
+  const candidatesForScore = mode === "broaden" && filtered.length < 8 ? filtered : filtered;
 
   const scored = candidatesForScore
     .map((c) => ({

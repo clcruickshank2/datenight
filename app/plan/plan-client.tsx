@@ -119,6 +119,28 @@ function uniquePhrases(items: string[]): string[] {
 
 function extractFreeformPreferences(lower: string): string[] {
   const chunks: string[] = [];
+  const BLOCKLIST = new Set([
+    "next",
+    "week",
+    "weeks",
+    "tonight",
+    "today",
+    "tomorrow",
+    "friday",
+    "saturday",
+    "sunday",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "party",
+    "people",
+    "guests",
+    "diners",
+    "under",
+    "between",
+    "budget",
+  ]);
 
   const patterns = [
     /(?:preference for|prefer)\s+([^.!?]+)/g,
@@ -142,6 +164,9 @@ function extractFreeformPreferences(lower: string): string[] {
       if (!pref) continue;
       if (STOPWORD_PREFS.has(pref)) continue;
       if (pref.length <= 2) continue;
+      if (pref.split(" ").length > 4) continue;
+      const words = pref.split(" ");
+      if (words.some((w) => BLOCKLIST.has(w))) continue;
       tokens.push(pref);
     }
   }
@@ -301,11 +326,12 @@ export function PlanClient({ profile }: Props) {
       dateStart: "",
       dateEnd: "",
       partySize: profile.party_size,
-      vibeTags: uniquePhrases([...profile.vibe_tags]),
+      // Start empty so chat intent drives tags instead of sticky defaults.
+      vibeTags: [],
       minPrice: profile.price_min,
       maxPrice: profile.price_max,
     }),
-    [profile.party_size, profile.vibe_tags, profile.price_min, profile.price_max]
+    [profile.party_size, profile.price_min, profile.price_max]
   );
 
   const [criteria, setCriteria] = useState<PlanCriteria>(defaultCriteria);
@@ -316,7 +342,7 @@ export function PlanClient({ profile }: Props) {
     },
   ]);
   const [input, setInput] = useState("");
-  const [vibeInput, setVibeInput] = useState(defaultCriteria.vibeTags.join(", "));
+  const [vibeInput, setVibeInput] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [lastChatSource, setLastChatSource] = useState<"llm" | "fallback" | null>(
     null

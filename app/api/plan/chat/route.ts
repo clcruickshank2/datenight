@@ -89,6 +89,8 @@ Rules:
   - "up to $$$" => maxPrice=3
   - "between $$ and $$$" => minPrice=2, maxPrice=3
 - Parse dynamic tags, including dietary/cuisine/vibe terms like vegetarian, vegan, gluten-free, italian, cozy, romantic, etc.
+- Only add vibeTagsToAdd when explicitly mentioned by the user in this latest message.
+- Do not add generic defaults like "cozy" or "date night" unless user explicitly says them.
 - Keep dates as YYYY-MM-DD when you can infer a range (e.g. next 3 weeks).
 - Never remove existing tags; only add new tags in vibeTagsToAdd.
 - Keep assistantMessage short (1-2 sentences).

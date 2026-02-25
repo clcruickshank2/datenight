@@ -26,6 +26,7 @@ const MAX_ITEMS_PER_FEED = 30;
 const ARTICLE_FETCH_TIMEOUT_MS = 10_000;
 const TRENDING_MIN_VALID_COUNT = 6;
 const TRENDING_MIN_EVIDENCE_RATIO = 0.7;
+const ARTICLE_EXCERPT_MAX_CHARS = 9000;
 
 type TrendingRestaurantRow = {
   name: string;
@@ -51,6 +52,44 @@ function stripHtmlToText(html: string): string {
     .trim();
 }
 
+function extractArticleLikeHtml(html: string): string {
+  const withoutNonContent = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
+    .replace(/<nav[\s\S]*?<\/nav>/gi, " ")
+    .replace(/<header[\s\S]*?<\/header>/gi, " ")
+    .replace(/<footer[\s\S]*?<\/footer>/gi, " ")
+    .replace(/<aside[\s\S]*?<\/aside>/gi, " ");
+
+  const candidates: string[] = [];
+  const pushMatches = (re: RegExp) => {
+    const matches = withoutNonContent.match(re);
+    if (!matches) return;
+    for (const m of matches) candidates.push(m);
+  };
+
+  pushMatches(/<article[\s\S]*?<\/article>/gi);
+  pushMatches(/<main[\s\S]*?<\/main>/gi);
+  pushMatches(/<(section|div)[^>]*(content|article|post|entry|story|body)[^>]*>[\s\S]*?<\/\1>/gi);
+
+  if (candidates.length === 0) {
+    return withoutNonContent;
+  }
+
+  candidates.sort((a, b) => b.length - a.length);
+  return candidates[0];
+}
+
+function stripKnownNoisePhrases(text: string): string {
+  return text
+    .replace(/\b(sign up|subscribe|newsletter|privacy policy|terms of use|cookie policy)\b/gi, " ")
+    .replace(/\b(log in|login|register|my account)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 async function fetchArticleExcerpt(url: string): Promise<string> {
   try {
     const controller = new AbortController();
@@ -63,9 +102,10 @@ async function fetchArticleExcerpt(url: string): Promise<string> {
     clearTimeout(timeout);
     if (!res.ok) return "";
     const html = await res.text();
-    const text = stripHtmlToText(html);
-    // Keep prompt size reasonable; enough context for restaurant extraction
-    return text.slice(0, 3500);
+    const articleHtml = extractArticleLikeHtml(html);
+    const text = stripKnownNoisePhrases(stripHtmlToText(articleHtml));
+    // Keep prompt size reasonable while allowing long list-style articles.
+    return text.slice(0, ARTICLE_EXCERPT_MAX_CHARS);
   } catch {
     return "";
   }
@@ -327,7 +367,7 @@ export async function GET(request: NextRequest) {
 
         const enriched = curatedArticles.map((a) => ({
           ...a,
-          summary: `${a.summary ?? ""} ${excerptById.get(a.id) ?? ""}`.trim().slice(0, 4000),
+          summary: `${a.summary ?? ""} ${excerptById.get(a.id) ?? ""}`.trim().slice(0, 9000),
         }));
         const articleTextById = new Map(
           enriched.map((a) => [a.id, `${a.title} ${a.summary ?? ""}`])
