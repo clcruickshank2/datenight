@@ -188,7 +188,7 @@ export async function GET(request: NextRequest) {
 
   // Trending restaurant extraction (from curated articles)
   let trendingInserted = 0;
-  let trendingMethod: "llm" | "none" = "none";
+  let trendingMethod: "llm" | "heuristic" | "none" = "none";
   let trendingError: string | undefined;
   if (process.env.OPENAI_API_KEY) {
     try {
@@ -220,7 +220,8 @@ export async function GET(request: NextRequest) {
               trendingError = insertErr.error;
             } else {
               trendingInserted = extracted.restaurants.length;
-              trendingMethod = "llm";
+              trendingMethod = extracted.method ?? "llm";
+              if (extracted.error) trendingError = extracted.error;
             }
           }
         } else {

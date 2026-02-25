@@ -9,6 +9,8 @@ export type PlanCriteria = {
   dateEnd: string;
   partySize: number | null;
   vibeTags: string[];
+  minPrice: number | null;
+  maxPrice: number | null;
 };
 
 type ChatMessage = { role: "user" | "bot"; text: string };
@@ -49,6 +51,10 @@ const PREFERENCE_KEYWORDS = [
   "pizza",
   "brunch",
   "cocktails",
+  "vegetarian",
+  "vegan",
+  "gluten free",
+  "gluten-free",
 ];
 
 const STOPWORD_PREFS = new Set([
@@ -70,6 +76,17 @@ const STOPWORD_PREFS = new Set([
   "of",
   "in",
   "near",
+]);
+
+const HARD_FILTER_TAGS = new Set([
+  "vegetarian",
+  "vegan",
+  "gluten free",
+  "gluten-free",
+  "dairy free",
+  "halal",
+  "kosher",
+  "pescatarian",
 ]);
 
 function normalizePhrase(s: string): string {
@@ -127,7 +144,6 @@ function parseMessageForCriteria(text: string): Partial<PlanCriteria> {
   const lower = text.toLowerCase().trim();
   const out: Partial<PlanCriteria> = {};
 
-  // Party size: "2", "party of 4", "4 people"
   const partyMatch = lower.match(/(?:party of|for)\s*(\d+)|(\d+)\s*(?:people|guests|diners)?/);
   if (partyMatch) {
     const n = parseInt(partyMatch[1] || partyMatch[2] || "0", 10);
@@ -139,13 +155,27 @@ function parseMessageForCriteria(text: string): Partial<PlanCriteria> {
     if (n >= 1 && n <= 20) out.partySize = n;
   }
 
-  // Preferences: keyword matches + free-form signals (e.g. "preference for italian")
   const foundByKeyword = PREFERENCE_KEYWORDS.filter((v) => lower.includes(v));
   const foundFreeform = extractFreeformPreferences(lower);
   const prefs = uniquePhrases([...foundByKeyword, ...foundFreeform]);
   if (prefs.length) out.vibeTags = prefs;
 
-  // When: tonight, tomorrow, next N weeks, next week, next friday, etc.
+  const between = lower.match(/between\s*(\${1,4})\s*and\s*(\${1,4})/);
+  if (between) {
+    const a = between[1].length;
+    const b = between[2].length;
+    out.minPrice = Math.min(a, b);
+    out.maxPrice = Math.max(a, b);
+  } else {
+    const under = lower.match(/(?:under|up to|max)\s*(\${1,4})/);
+    if (under) out.maxPrice = under[1].length;
+    const exact = lower.match(/\${1,4}/);
+    if (exact && out.minPrice == null && out.maxPrice == null) {
+      out.minPrice = exact[0].length;
+      out.maxPrice = exact[0].length;
+    }
+  }
+
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const yyyy = today.getFullYear();
@@ -227,6 +257,27 @@ function getNextPrompt(criteria: PlanCriteria): string | null {
   return null;
 }
 
+function applyHardFilters(restaurants: Restaurant[], criteria: PlanCriteria): Restaurant[] {
+  const priced = restaurants.filter((r) => {
+    if (r.price_level == null) return true;
+    if (criteria.minPrice != null && r.price_level < criteria.minPrice) return false;
+    if (criteria.maxPrice != null && r.price_level > criteria.maxPrice) return false;
+    return true;
+  });
+
+  const strictTags = criteria.vibeTags.filter((t) => HARD_FILTER_TAGS.has(t));
+  if (strictTags.length === 0) return priced;
+
+  const strict = priced.filter((r) => {
+    const haystack = normalizePhrase(
+      [r.name, r.neighborhood ?? "", r.notes ?? "", (r.vibe_tags || []).join(" ")].join(" ")
+    );
+    return strictTags.every((tag) => haystack.includes(normalizePhrase(tag)));
+  });
+
+  return strict.length > 0 ? strict : priced;
+}
+
 function scoreRestaurant(
   restaurant: Restaurant,
   criteria: PlanCriteria,
@@ -260,14 +311,13 @@ function scoreRestaurant(
   }
 
   if (restaurant.price_level != null) {
-    if (
-      restaurant.price_level >= profile.price_min &&
-      restaurant.price_level <= profile.price_max
-    ) {
+    const minPrice = criteria.minPrice ?? profile.price_min;
+    const maxPrice = criteria.maxPrice ?? profile.price_max;
+    if (restaurant.price_level >= minPrice && restaurant.price_level <= maxPrice) {
       score += 3;
       reasons.push("within your price range");
     } else {
-      score -= 1;
+      score -= 3;
     }
   }
 
@@ -276,7 +326,6 @@ function scoreRestaurant(
     reasons.push("has a booking link");
   }
 
-  // Light party-size relevance from notes/tags until availability checks are wired.
   if (criteria.partySize != null && criteria.partySize >= 5 && /group|family|share/.test(haystack)) {
     score += 2;
     reasons.push("good fit for a larger group");
@@ -285,9 +334,6 @@ function scoreRestaurant(
     score += 2;
     reasons.push("great for date night");
   }
-
-  // Keep deterministic ordering when score ties.
-  score += 0.001;
 
   return {
     restaurant,
@@ -321,8 +367,10 @@ export function PlanClient({ profile, restaurants }: Props) {
       dateEnd: "",
       partySize: profile.party_size,
       vibeTags: uniquePhrases([...profile.vibe_tags]),
+      minPrice: profile.price_min,
+      maxPrice: profile.price_max,
     }),
-    [profile.party_size, profile.vibe_tags]
+    [profile.party_size, profile.vibe_tags, profile.price_min, profile.price_max]
   );
 
   const [criteria, setCriteria] = useState<PlanCriteria>(defaultCriteria);
@@ -333,49 +381,117 @@ export function PlanClient({ profile, restaurants }: Props) {
     },
   ]);
   const [input, setInput] = useState("");
+  const [isSending, setIsSending] = useState(false);
 
   const updateCriteria = (patch: Partial<PlanCriteria>) => {
     setCriteria((c) => {
       const next = { ...c, ...patch };
       if (patch.vibeTags) next.vibeTags = uniquePhrases(patch.vibeTags);
+      if (next.minPrice != null && next.maxPrice != null && next.minPrice > next.maxPrice) {
+        const t = next.minPrice;
+        next.minPrice = next.maxPrice;
+        next.maxPrice = t;
+      }
       return next;
     });
   };
 
-  const sendMessage = () => {
+  const sendMessage = async () => {
     const text = input.trim();
-    if (!text) return;
+    if (!text || isSending) return;
+    setIsSending(true);
     setInput("");
     setMessages((m) => [...m, { role: "user", text }]);
 
-    const parsed = parseMessageForCriteria(text);
-    const nextCriteria: PlanCriteria = {
-      ...criteria,
-      ...parsed,
-      vibeTags: uniquePhrases([
-        ...criteria.vibeTags,
-        ...(parsed.vibeTags ?? []),
-      ]),
-    };
-    setCriteria(nextCriteria);
+    try {
+      const res = await fetch("/api/plan/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text, criteria }),
+      });
+      if (!res.ok) throw new Error("chat endpoint failed");
 
-    const nextPrompt = getNextPrompt(nextCriteria);
-    if (nextPrompt) {
-      setMessages((m) => [...m, { role: "bot", text: nextPrompt }]);
-    } else {
+      const data = (await res.json()) as {
+        assistantMessage?: string;
+        criteriaPatch?: {
+          dateStart?: string;
+          dateEnd?: string;
+          partySize?: number;
+          minPrice?: number;
+          maxPrice?: number;
+          vibeTagsToAdd?: string[];
+        };
+      };
+      const patch = data.criteriaPatch ?? {};
+      const nextCriteria: PlanCriteria = {
+        ...criteria,
+        dateStart: patch.dateStart ?? criteria.dateStart,
+        dateEnd: patch.dateEnd ?? criteria.dateEnd,
+        partySize: patch.partySize ?? criteria.partySize,
+        minPrice: patch.minPrice ?? criteria.minPrice,
+        maxPrice: patch.maxPrice ?? criteria.maxPrice,
+        vibeTags: uniquePhrases([
+          ...criteria.vibeTags,
+          ...(patch.vibeTagsToAdd ?? []),
+        ]),
+      };
+      if (
+        nextCriteria.minPrice != null &&
+        nextCriteria.maxPrice != null &&
+        nextCriteria.minPrice > nextCriteria.maxPrice
+      ) {
+        const t = nextCriteria.minPrice;
+        nextCriteria.minPrice = nextCriteria.maxPrice;
+        nextCriteria.maxPrice = t;
+      }
+      setCriteria(nextCriteria);
+
+      const botText =
+        data.assistantMessage?.trim() ||
+        getNextPrompt(nextCriteria) ||
+        "Got it. I updated your criteria and recommendations.";
+      setMessages((m) => [...m, { role: "bot", text: botText }]);
+    } catch {
+      const parsed = parseMessageForCriteria(text);
+      const nextCriteria: PlanCriteria = {
+        ...criteria,
+        ...parsed,
+        vibeTags: uniquePhrases([...criteria.vibeTags, ...(parsed.vibeTags ?? [])]),
+        minPrice: parsed.minPrice ?? criteria.minPrice,
+        maxPrice: parsed.maxPrice ?? criteria.maxPrice,
+      };
+      if (
+        nextCriteria.minPrice != null &&
+        nextCriteria.maxPrice != null &&
+        nextCriteria.minPrice > nextCriteria.maxPrice
+      ) {
+        const t = nextCriteria.minPrice;
+        nextCriteria.minPrice = nextCriteria.maxPrice;
+        nextCriteria.maxPrice = t;
+      }
+      setCriteria(nextCriteria);
+      const nextPrompt = getNextPrompt(nextCriteria);
       setMessages((m) => [
         ...m,
         {
           role: "bot",
-          text: "Perfect. I ranked recommendations below and included why each place fits.",
+          text:
+            nextPrompt ??
+            "Got it. I updated your criteria and refreshed recommendations.",
         },
       ]);
+    } finally {
+      setIsSending(false);
     }
   };
 
+  const filteredRestaurants = useMemo(
+    () => applyHardFilters(restaurants, criteria),
+    [restaurants, criteria]
+  );
   const ranked = useMemo(
-    () => rankRestaurants(restaurants, criteria, profile),
-    [restaurants, criteria, profile]
+    () => rankRestaurants(filteredRestaurants, criteria, profile),
+    [filteredRestaurants, criteria, profile]
   );
 
   const topRecommendations = ranked.slice(0, 5);
@@ -383,12 +499,14 @@ export function PlanClient({ profile, restaurants }: Props) {
     criteria.dateStart ||
     criteria.dateEnd ||
     criteria.partySize != null ||
-    criteria.vibeTags.length > 0;
+    criteria.vibeTags.length > 0 ||
+    criteria.minPrice != null ||
+    criteria.maxPrice != null;
 
   return (
     <div className="space-y-8">
       <p className="text-sm text-slate-500">
-        Hi, {profile.display_name} · Defaults: party of {profile.party_size}, {profile.time_window_start.slice(0, 5)}-{profile.time_window_end.slice(0, 5)}
+        Hi, {profile.display_name} · Defaults: party of {profile.party_size}, {profile.time_window_start.slice(0, 5)}-{profile.time_window_end.slice(0, 5)}, budget {"$".repeat(profile.price_min)}-{"$".repeat(profile.price_max)}
       </p>
 
       <section className="card">
@@ -416,12 +534,17 @@ export function PlanClient({ profile, restaurants }: Props) {
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && sendMessage()}
-            placeholder="e.g. Date night Friday or Saturday in the next 3 weeks, preference for italian"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void sendMessage();
+              }
+            }}
+            placeholder="e.g. Date night Friday or Saturday in the next 3 weeks, preference for italian under $$$"
             className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-teal-600 focus:outline-none focus:ring-1 focus:ring-teal-600"
           />
-          <button type="button" onClick={sendMessage} className="btn-primary whitespace-nowrap">
-            Send
+          <button type="button" onClick={() => void sendMessage()} className="btn-primary whitespace-nowrap" disabled={isSending}>
+            {isSending ? "Thinking..." : "Send"}
           </button>
         </div>
       </section>
@@ -464,7 +587,7 @@ export function PlanClient({ profile, restaurants }: Props) {
             />
           </div>
           <div className="sm:col-span-2">
-            <label className="mb-1 block text-sm font-medium text-slate-700">Vibes / cuisine</label>
+            <label className="mb-1 block text-sm font-medium text-slate-700">Vibes / cuisine / dietary tags</label>
             <input
               type="text"
               value={criteria.vibeTags.join(", ")}
@@ -473,9 +596,45 @@ export function PlanClient({ profile, restaurants }: Props) {
                   vibeTags: uniquePhrases(e.target.value.split(/[,;]/)),
                 })
               }
-              placeholder="e.g. romantic, cozy, italian"
+              placeholder="e.g. romantic, italian, vegetarian"
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-teal-600 focus:outline-none focus:ring-1 focus:ring-teal-600"
             />
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-slate-700">Min budget</label>
+            <select
+              value={criteria.minPrice ?? ""}
+              onChange={(e) =>
+                updateCriteria({
+                  minPrice: e.target.value ? parseInt(e.target.value, 10) : null,
+                })
+              }
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-teal-600 focus:outline-none focus:ring-1 focus:ring-teal-600"
+            >
+              <option value="">Any</option>
+              <option value="1">$</option>
+              <option value="2">$$</option>
+              <option value="3">$$$</option>
+              <option value="4">$$$$</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-slate-700">Max budget</label>
+            <select
+              value={criteria.maxPrice ?? ""}
+              onChange={(e) =>
+                updateCriteria({
+                  maxPrice: e.target.value ? parseInt(e.target.value, 10) : null,
+                })
+              }
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-teal-600 focus:outline-none focus:ring-1 focus:ring-teal-600"
+            >
+              <option value="">Any</option>
+              <option value="1">$</option>
+              <option value="2">$$</option>
+              <option value="3">$$$</option>
+              <option value="4">$$$$</option>
+            </select>
           </div>
         </div>
       </section>

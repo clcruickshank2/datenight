@@ -28,6 +28,7 @@ export type TrendingExtractionResult = {
     overview: string;
     source_article_ids: string[];
   }[];
+  method?: "llm" | "heuristic";
   error?: string;
 };
 
@@ -374,9 +375,81 @@ Return ONLY valid JSON array of objects:
         source_article_ids: r.source_article_ids.length ? r.source_article_ids : [articles[0].id],
       }));
 
-    return { restaurants: out.slice(0, 15) };
+    const trimmed = out.slice(0, 15);
+    if (trimmed.length > 0) {
+      return { restaurants: trimmed, method: "llm" };
+    }
+    const fallback = heuristicTrendingRestaurants(articles);
+    if (fallback.length > 0) {
+      return {
+        restaurants: fallback,
+        method: "heuristic",
+        error: "LLM returned empty extraction; used heuristic fallback",
+      };
+    }
+    return { restaurants: [], method: "llm", error: "LLM returned empty extraction" };
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown extraction error";
-    return { restaurants: [], error: message };
+    const fallback = heuristicTrendingRestaurants(articles);
+    if (fallback.length > 0) {
+      return {
+        restaurants: fallback,
+        method: "heuristic",
+        error: `${message}; used heuristic fallback`,
+      };
+    }
+    return { restaurants: [], method: "llm", error: message };
   }
+}
+
+function heuristicTrendingRestaurants(
+  articles: ArticleForCuration[]
+): { name: string; overview: string; source_article_ids: string[] }[] {
+  const stop = new Set([
+    "Denver",
+    "Eater",
+    "Magazine",
+    "Guide",
+    "Guides",
+    "Restaurants",
+    "Restaurant",
+    "Food",
+    "Foods",
+    "Cherry Creek",
+    "LoHi",
+    "Fall",
+    "The",
+    "A",
+    "An",
+  ]);
+
+  const byName = new Map<string, { count: number; articleIds: Set<string> }>();
+  for (const a of articles) {
+    const text = `${a.title}. ${a.summary ?? ""}`;
+    const re = /\b([A-Z][a-zA-Z'&.-]+(?:\s+[A-Z][a-zA-Z'&.-]+){0,3})\b/g;
+    const seenThisArticle = new Set<string>();
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const raw = m[1].trim();
+      if (raw.length < 3 || raw.length > 40) continue;
+      if (stop.has(raw)) continue;
+      // skip obvious non-restaurant phrases
+      if (/(Best|Top|Guide|Denver|Food|Restaurant|Restaurants|Michelin|Bib Gourmand)$/i.test(raw)) continue;
+      if (seenThisArticle.has(raw)) continue;
+      seenThisArticle.add(raw);
+      const rec = byName.get(raw) ?? { count: 0, articleIds: new Set<string>() };
+      rec.count += 1;
+      rec.articleIds.add(a.id);
+      byName.set(raw, rec);
+    }
+  }
+
+  return Array.from(byName.entries())
+    .sort((a, b) => b[1].count - a[1].count)
+    .slice(0, 15)
+    .map(([name, rec]) => ({
+      name,
+      overview: "Mentioned in this week's curated Denver food coverage.",
+      source_article_ids: Array.from(rec.articleIds),
+    }));
 }
