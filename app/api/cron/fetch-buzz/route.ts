@@ -33,7 +33,6 @@ export async function GET(request: NextRequest) {
     const feedUrl = source.feed_url;
     if (!feedUrl) continue;
 
-    let items = 0;
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10_000);
