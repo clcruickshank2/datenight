@@ -220,6 +220,7 @@ export async function insertBuzzRestaurants(
     website_url?: string | null;
     image_url?: string | null;
     overview?: string | null;
+    google_place_id?: string | null;
     neighborhood?: string | null;
     price_level?: number | null;
     cuisine_vibes?: string[];
@@ -235,6 +236,7 @@ export async function insertBuzzRestaurants(
     website_url: r.website_url ?? null,
     image_url: r.image_url ?? null,
     overview: r.overview ?? null,
+    google_place_id: r.google_place_id ?? null,
     neighborhood: r.neighborhood ?? null,
     price_level: r.price_level ?? null,
     cuisine_vibes: r.cuisine_vibes ?? [],

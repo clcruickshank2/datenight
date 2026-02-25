@@ -24,6 +24,8 @@ type UiRecommendation = {
   source: "db" | "web";
   reason: string;
   tradeoff: string;
+  googleRating: number | null;
+  ratingSource: string | null;
 };
 
 type RecommendResponse = {
@@ -741,6 +743,14 @@ export function PlanClient({ profile }: Props) {
                   <div className="flex items-center gap-2">
                     {r.priceLevel != null && (
                       <div className="text-xs text-slate-500">{"$".repeat(r.priceLevel)}</div>
+                    )}
+                    {r.googleRating != null && (
+                      <div
+                        className="rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-700"
+                        title={r.ratingSource ? `Rating source: ${r.ratingSource}` : "Rating source: Google"}
+                      >
+                        ★ {r.googleRating.toFixed(1)} G
+                      </div>
                     )}
                     <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">{r.source}</span>
                   </div>

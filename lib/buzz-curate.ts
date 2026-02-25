@@ -27,6 +27,8 @@ export type TrendingExtractionResult = {
     name: string;
     overview: string;
     source_article_ids: string[];
+    website_url?: string | null;
+    google_place_id?: string | null;
     neighborhood?: string | null;
     price_level?: number | null;
     cuisine_vibes?: string[];
@@ -48,6 +50,14 @@ type LlmTelemetry = {
   llm_calls: number;
   request_ids: string[];
   stages: string[];
+};
+
+type GooglePlacesEnrichment = {
+  website_url: string | null;
+  google_place_id: string | null;
+  neighborhood: string | null;
+  google_rating: number | null;
+  rating_source: string | null;
 };
 
 function parseJsonArrayFromModel(content: string): unknown[] {
@@ -1062,14 +1072,24 @@ Rules:
     }
 
     let enrichedCount = 0;
+    const placesByName = await enrichWithGooglePlaces(restaurants, telemetry);
     const merged = restaurants.map((r) => {
       const enriched = byName.get(normalizeRestaurantName(r.name));
-      const neighborhood = sanitizeNullableText(enriched?.neighborhood);
+      const places = placesByName.get(normalizeRestaurantName(r.name));
+      const neighborhood =
+        sanitizeNullableText(places?.neighborhood) ??
+        sanitizeNullableText(enriched?.neighborhood);
       const price_level = sanitizePriceLevel(enriched?.price_level);
       const cuisine_vibes = sanitizeCuisineVibes(enriched?.cuisine_vibes);
-      const google_rating = sanitizeGoogleRating(enriched?.google_rating);
-      const rating_source = sanitizeNullableText(enriched?.rating_source);
+      const google_rating =
+        sanitizeGoogleRating(places?.google_rating) ??
+        sanitizeGoogleRating(enriched?.google_rating);
+      const rating_source =
+        sanitizeNullableText(places?.rating_source) ??
+        sanitizeNullableText(enriched?.rating_source);
       const overview = sanitizeNullableText(enriched?.overview) ?? r.overview;
+      const website_url = sanitizeUrl(places?.website_url);
+      const google_place_id = sanitizeNullableText(places?.google_place_id);
 
       if (
         neighborhood !== null ||
@@ -1084,6 +1104,8 @@ Rules:
         name: r.name,
         overview,
         source_article_ids: r.source_article_ids,
+        website_url,
+        google_place_id,
         neighborhood,
         price_level,
         cuisine_vibes,
@@ -1148,6 +1170,13 @@ function sanitizeCuisineVibes(value: unknown): string[] {
   return out;
 }
 
+function sanitizeUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return null;
+  return trimmed.slice(0, 300);
+}
+
 function isPlausibleRestaurantName(name: string): boolean {
   const trimmed = name.trim();
   if (!trimmed) return false;
@@ -1190,4 +1219,128 @@ function isPlausibleRestaurantName(name: string): boolean {
   if (trimmed === trimmed.toUpperCase() && words.length >= 2) return false;
 
   return true;
+}
+
+async function enrichWithGooglePlaces(
+  restaurants: ExtractedTrendingRestaurant[],
+  telemetry?: LlmTelemetry
+): Promise<Map<string, GooglePlacesEnrichment>> {
+  const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+  const byName = new Map<string, GooglePlacesEnrichment>();
+  if (!apiKey || restaurants.length === 0) return byName;
+
+  if (telemetry) telemetry.stages.push("places:started");
+
+  for (const r of restaurants) {
+    const query = `${r.name} restaurant Denver Colorado`;
+    const placeId = await fetchGooglePlaceId(query, apiKey, telemetry);
+    if (!placeId) continue;
+    const details = await fetchGooglePlaceDetails(placeId, apiKey, telemetry);
+    if (!details) continue;
+    byName.set(normalizeRestaurantName(r.name), details);
+  }
+
+  if (telemetry) telemetry.stages.push(`places:ok_${byName.size}`);
+  return byName;
+}
+
+async function fetchGooglePlaceId(
+  textQuery: string,
+  apiKey: string,
+  telemetry?: LlmTelemetry
+): Promise<string | null> {
+  try {
+    const endpoint = "https://places.googleapis.com/v1/places:searchText";
+    const body = {
+      textQuery,
+      languageCode: "en",
+      maxResultCount: 1,
+      locationBias: {
+        circle: {
+          center: { latitude: 39.7392, longitude: -104.9903 },
+          radius: 50000,
+        },
+      },
+    };
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": apiKey,
+        "X-Goog-FieldMask": "places.id",
+      },
+      body: JSON.stringify(body),
+    });
+    if (telemetry) telemetry.stages.push(`places_search:${res.status}`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { places?: { id?: string }[] };
+    return data.places?.[0]?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchGooglePlaceDetails(
+  placeId: string,
+  apiKey: string,
+  telemetry?: LlmTelemetry
+): Promise<GooglePlacesEnrichment | null> {
+  try {
+    const endpoint = `https://places.googleapis.com/v1/places/${placeId}`;
+    const res = await fetch(endpoint, {
+      headers: {
+        "X-Goog-Api-Key": apiKey,
+        "X-Goog-FieldMask":
+          "id,rating,websiteUri,addressComponents,displayName",
+      },
+      cache: "no-store",
+    });
+    if (telemetry) telemetry.stages.push(`places_details:${res.status}`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      id?: string;
+      rating?: number;
+      websiteUri?: string;
+      addressComponents?: {
+        longText?: string;
+        shortText?: string;
+        types?: string[];
+      }[];
+    };
+    const neighborhood = extractNeighborhoodFromAddressComponents(
+      data.addressComponents ?? []
+    );
+    return {
+      website_url: data.websiteUri ?? null,
+      google_place_id: data.id ?? null,
+      neighborhood,
+      google_rating:
+        typeof data.rating === "number" && Number.isFinite(data.rating)
+          ? data.rating
+          : null,
+      rating_source:
+        typeof data.rating === "number" && Number.isFinite(data.rating)
+          ? "google"
+          : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function extractNeighborhoodFromAddressComponents(
+  components: { longText?: string; shortText?: string; types?: string[] }[]
+): string | null {
+  const preferredTypes = [
+    "neighborhood",
+    "sublocality_level_1",
+    "sublocality",
+    "locality",
+  ];
+  for (const type of preferredTypes) {
+    const match = components.find((c) => c.types?.includes(type));
+    const value = match?.longText?.trim() || match?.shortText?.trim();
+    if (value) return value.slice(0, 120);
+  }
+  return null;
 }

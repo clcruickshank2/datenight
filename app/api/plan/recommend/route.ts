@@ -22,6 +22,7 @@ type Candidate = {
   notes: string | null;
   source: "db" | "web";
   tagsText: string;
+  tags: string[];
 };
 
 type Recommendation = {
@@ -33,6 +34,8 @@ type Recommendation = {
   source: "db" | "web";
   reason: string;
   tradeoff: string;
+  googleRating: number | null;
+  ratingSource: string | null;
 };
 
 const HARD_DIETARY = new Set([
@@ -63,6 +66,7 @@ const CUISINE_HINTS = new Set([
   "pizza",
   "ramen",
   "omakase",
+  "burger",
 ]);
 
 const CUISINE_SYNONYMS: Record<string, string[]> = {
@@ -82,6 +86,7 @@ const CUISINE_SYNONYMS: Record<string, string[]> = {
   pizza: ["pizza", "pizzeria"],
   ramen: ["ramen"],
   omakase: ["omakase", "sushi"],
+  burger: ["burger", "burgers", "hamburger", "smashburger"],
 };
 
 function normalize(s: string): string {
@@ -122,6 +127,7 @@ function textMatchesCuisine(hay: string, cuisineIntent: string[]): boolean {
 }
 
 function candidateFromRestaurant(r: Restaurant): Candidate {
+  const tags = unique(r.vibe_tags || []);
   return {
     id: r.id,
     name: r.name,
@@ -130,8 +136,114 @@ function candidateFromRestaurant(r: Restaurant): Candidate {
     bookingUrl: r.booking_url,
     notes: r.notes,
     source: "db",
-    tagsText: unique(r.vibe_tags || []).join(" "),
+    tagsText: tags.join(" "),
+    tags,
   };
+}
+
+function parseCuisineLabelFromNotes(notes: string | null): string | null {
+  if (!notes) return null;
+  const m = notes.match(/cuisine:\s*([^|]+)/i);
+  if (!m?.[1]) return null;
+  return m[1].trim();
+}
+
+function standoutTag(tags: string[], criteriaTags: string[]): string | null {
+  const generic = new Set([
+    "trendy",
+    "casual",
+    "lively",
+    "cozy",
+    "romantic",
+    "date night",
+    "upscale",
+    "intimate",
+    "quiet",
+    "group friendly",
+    "neighborhood gem",
+  ]);
+  const criteriaSet = new Set(criteriaTags.map(normalize));
+  const candidate = tags.find((t) => {
+    const n = normalize(t);
+    if (!n) return false;
+    if (generic.has(n)) return false;
+    if (criteriaSet.has(n)) return false;
+    return n.length >= 4;
+  });
+  return candidate ?? null;
+}
+
+function buildContextualReason(
+  c: Candidate,
+  criteria: PlanCriteria,
+  matchedCuisine: string[],
+  inPreferredArea: boolean
+): string {
+  const criteriaTags = unique(criteria.vibeTags ?? []);
+  const cuisineLabel = parseCuisineLabelFromNotes(c.notes) ?? (matchedCuisine[0] ? `${matchedCuisine[0]} menu` : null);
+  const standout = standoutTag(c.tags, criteriaTags);
+
+  if (matchedCuisine.length > 0 && standout) {
+    return `Known for ${standout}, with a strong ${cuisineLabel ?? matchedCuisine[0]} fit for your request.`;
+  }
+  if (matchedCuisine.length > 0) {
+    return `A strong ${cuisineLabel ?? matchedCuisine[0]} match based on your criteria.`;
+  }
+  if (standout) {
+    return `Known for ${standout}, which aligns with your vibe and timing.`;
+  }
+  if (inPreferredArea) {
+    return "In your preferred area and within your stated constraints.";
+  }
+  return "Solid overall fit for your current date, party size, and budget.";
+}
+
+function buildContextualTradeoff(c: Candidate, criteria: PlanCriteria): string {
+  const min = criteria.minPrice ?? 1;
+  const max = criteria.maxPrice ?? 4;
+  if (c.priceLevel != null) {
+    if (c.priceLevel === max && max >= 3) return "At the top of your budget range.";
+    if (c.priceLevel < min) return "Below your target budget, with potentially simpler ambiance.";
+  }
+  if (!c.bookingUrl) return "No direct booking link yet, so availability may take an extra step.";
+  return "Popular times may require flexibility on exact seating time.";
+}
+
+async function fetchBuzzRatingsByName(names: string[]): Promise<Map<string, { googleRating: number | null; ratingSource: string | null }>> {
+  const map = new Map<string, { googleRating: number | null; ratingSource: string | null }>();
+  const uniqueNames = Array.from(new Set(names.map((n) => n.trim()).filter(Boolean)));
+  if (uniqueNames.length === 0) return map;
+
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) return map;
+
+  try {
+    const inValues = uniqueNames
+      .map((name) => `"${name.replace(/"/g, '\\"')}"`)
+      .join(",");
+    const res = await fetch(
+      `${url}/rest/v1/buzz_restaurants?select=name,google_rating,rating_source&name=in.(${encodeURIComponent(inValues)})`,
+      {
+        headers: {
+          apikey: key,
+          Authorization: `Bearer ${key}`,
+        },
+        cache: "no-store",
+      }
+    );
+    if (!res.ok) return map;
+    const rows = (await res.json()) as { name: string; google_rating: number | null; rating_source: string | null }[];
+    for (const row of rows) {
+      map.set(normalize(row.name), {
+        googleRating: typeof row.google_rating === "number" ? row.google_rating : null,
+        ratingSource: row.rating_source ?? null,
+      });
+    }
+    return map;
+  } catch {
+    return map;
+  }
 }
 
 function matchesHardConstraints(c: Candidate, criteria: PlanCriteria): boolean {
@@ -278,6 +390,24 @@ function seededWebCuisineCandidates(criteria: PlanCriteria): Candidate[] {
         notes: "Cuisine-seeded live web candidate",
         source: "web",
         tagsText: "sushi japanese",
+        tags: ["sushi", "japanese"],
+      });
+    }
+  }
+  if (cuisineIntent.includes("burger")) {
+    const seeds = ["Cherry Cricket", "Park Burger", "My Brother's Bar"];
+    for (let i = 0; i < seeds.length; i++) {
+      const name = seeds[i];
+      out.push({
+        id: `web:seed:burger:${i}:${normalize(name).replace(/\s+/g, "-")}`,
+        name,
+        neighborhood: null,
+        priceLevel: null,
+        bookingUrl: `https://duckduckgo.com/?q=${encodeURIComponent(`${name} denver burgers`)}`,
+        notes: "Cuisine-seeded live web candidate",
+        source: "web",
+        tagsText: "burger american",
+        tags: ["burger"],
       });
     }
   }
@@ -316,6 +446,7 @@ async function webAugment(criteria: PlanCriteria): Promise<Candidate[]> {
         notes: "Live web candidate (DuckDuckGo augmentation)",
         source: "web",
         tagsText: queryCore,
+        tags: unique(queryCore.split(/\s+/)),
       });
     }
     const out = dedupeCandidates(picks).slice(0, 12);
@@ -453,6 +584,8 @@ Return ONLY JSON:
         source: c.source,
         reason,
         tradeoff,
+        googleRating: null,
+        ratingSource: null,
       });
       if (picks.length >= 3) break;
     }
@@ -571,10 +704,36 @@ export async function POST(req: NextRequest) {
       priceLevel: r.c.priceLevel,
       bookingUrl: r.c.bookingUrl,
       source: r.c.source,
-      reason: r.reasons[0] ?? "Strong fit for your preferences.",
-      tradeoff: "Consider flexibility on time window for best availability.",
+      reason: buildContextualReason(
+        r.c,
+        normalizedCriteria,
+        cuisineIntentFromTags(normalizedCriteria.vibeTags ?? []).filter((cuisine) =>
+          (CUISINE_SYNONYMS[cuisine] ?? [cuisine]).some((k) =>
+            normalize(`${r.c.name} ${r.c.neighborhood ?? ""} ${r.c.notes ?? ""} ${r.c.tagsText}`).includes(normalize(k))
+          )
+        ),
+        Boolean(
+          normalize(r.c.neighborhood ?? "") &&
+            (profile.neighborhoods || [])
+              .map(normalize)
+              .some((n) => normalize(r.c.neighborhood ?? "").includes(n) || n.includes(normalize(r.c.neighborhood ?? "")))
+        )
+      ),
+      tradeoff: buildContextualTradeoff(r.c, normalizedCriteria),
+      googleRating: null,
+      ratingSource: null,
     }));
   }
+
+  const ratingsMap = await fetchBuzzRatingsByName(recommendations.map((r) => r.name));
+  recommendations = recommendations.map((r) => {
+    const rating = ratingsMap.get(normalize(r.name));
+    return {
+      ...r,
+      googleRating: rating?.googleRating ?? null,
+      ratingSource: rating?.ratingSource ?? null,
+    };
+  });
 
   const finalConfidence = confidenceScore(
     recommendations.map((r) => ({

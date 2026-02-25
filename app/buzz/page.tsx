@@ -14,6 +14,14 @@ function formatPriceLevel(priceLevel: number | null): string {
   return "$".repeat(n);
 }
 
+function getDisplayTags(tags: string[]): string[] {
+  return tags
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0 && t.length <= 24)
+    .filter((t) => !/[.!?]/.test(t))
+    .slice(0, 5);
+}
+
 export default async function BuzzPage() {
   let articles: Awaited<ReturnType<typeof fetchBuzzArticles>> = [];
   let sources: Awaited<ReturnType<typeof fetchBuzzSources>> = [];
@@ -126,7 +134,7 @@ export default async function BuzzPage() {
                   <th className="py-2 pr-2 font-medium">Restaurant</th>
                   <th className="py-2 pr-2 font-medium">Neighborhood</th>
                   <th className="py-2 pr-2 font-medium">Price</th>
-                  <th className="py-2 pr-2 font-medium">Cuisine/Vibes</th>
+                  <th className="py-2 pr-2 font-medium">Tags</th>
                   <th className="py-2 pr-2 font-medium">Overview</th>
                   <th className="py-2 w-20 font-medium text-right">Rating</th>
                 </tr>
@@ -161,10 +169,23 @@ export default async function BuzzPage() {
                     </td>
                     <td className="py-3 pr-2 text-slate-600">{r.neighborhood ?? "—"}</td>
                     <td className="py-3 pr-2 text-slate-700">{formatPriceLevel(r.price_level)}</td>
-                    <td className="max-w-[220px] py-3 pr-2 text-slate-600 line-clamp-2">
-                      {r.cuisine_vibes.length > 0 ? r.cuisine_vibes.join(", ") : "—"}
+                    <td className="max-w-[220px] py-3 pr-2 text-slate-600">
+                      {getDisplayTags(r.cuisine_vibes).length > 0 ? (
+                        <div className="flex flex-wrap gap-1">
+                          {getDisplayTags(r.cuisine_vibes).map((tag) => (
+                            <span
+                              key={`${r.id}-${tag}`}
+                              className="rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-700"
+                            >
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        "—"
+                      )}
                     </td>
-                    <td className="max-w-[260px] py-3 pr-2 text-slate-600 line-clamp-2">
+                    <td className="max-w-[320px] py-3 pr-2 text-slate-600 line-clamp-3">
                       {r.overview ?? "—"}
                     </td>
                     <td className="py-3 text-right">

@@ -8,5 +8,6 @@ declare namespace NodeJS {
     TWILIO_AUTH_TOKEN?: string;
     TWILIO_FROM_PHONE?: string;
     OPENAI_API_KEY?: string;
+    GOOGLE_MAPS_API_KEY?: string;
   }
 }
