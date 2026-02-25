@@ -86,12 +86,39 @@ export async function fetchBuzzArticles(limit: number, sourceIds?: string[]): Pr
 }
 
 /** Recent articles for LLM curation (cron): last N by fetched_at, with title/summary/source for picking. */
-export async function fetchRecentBuzzArticlesForCuration(limit: number): Promise<{ id: string; title: string; url: string; summary: string | null; source_id: string }[]> {
+export async function fetchRecentBuzzArticlesForCuration(
+  limit: number,
+  recencyDays = 30
+): Promise<{ id: string; title: string; url: string; summary: string | null; source_id: string; published_at: string | null }[]> {
   const { url, key } = getConfig();
-  const path = `${url}/rest/v1/buzz_articles?select=id,title,url,summary,source_id&order=fetched_at.desc&limit=${limit}`;
-  const res = await fetch(path, { headers: headers(key), cache: "no-store" });
-  if (!res.ok) return [];
-  return (await res.json()) as { id: string; title: string; url: string; summary: string | null; source_id: string }[];
+  const sinceIso = new Date(Date.now() - recencyDays * 24 * 60 * 60 * 1000).toISOString();
+  const select = "id,title,url,summary,source_id,published_at";
+  const recentPath = `${url}/rest/v1/buzz_articles?select=${select}&published_at=gte.${sinceIso}&order=published_at.desc.nullslast,fetched_at.desc&limit=${limit}`;
+  const recentRes = await fetch(recentPath, { headers: headers(key), cache: "no-store" });
+  if (recentRes.ok) {
+    const recent = (await recentRes.json()) as {
+      id: string;
+      title: string;
+      url: string;
+      summary: string | null;
+      source_id: string;
+      published_at: string | null;
+    }[];
+    if (recent.length >= Math.min(10, limit)) return recent;
+  }
+
+  // Fallback: if not enough in the last recency window, use latest overall.
+  const fallbackPath = `${url}/rest/v1/buzz_articles?select=${select}&order=fetched_at.desc&limit=${limit}`;
+  const fallbackRes = await fetch(fallbackPath, { headers: headers(key), cache: "no-store" });
+  if (!fallbackRes.ok) return [];
+  return (await fallbackRes.json()) as {
+    id: string;
+    title: string;
+    url: string;
+    summary: string | null;
+    source_id: string;
+    published_at: string | null;
+  }[];
 }
 
 /** Clear curated_rank 1-5 (before setting new picks). */

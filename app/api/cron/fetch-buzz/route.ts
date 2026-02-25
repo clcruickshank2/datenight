@@ -7,7 +7,11 @@ import {
   clearBuzzCuratedRanks,
   setBuzzCuratedRanksById,
 } from "@/lib/buzz-server";
-import { fallbackCuratedArticleIds, pickCuratedArticleIds } from "@/lib/buzz-curate";
+import {
+  fallbackCuratedArticleIds,
+  pickCuratedArticleIds,
+  diversifyCuratedArticleIds,
+} from "@/lib/buzz-curate";
 import { parseRss, normalizePubDate } from "@/lib/rss";
 
 export const dynamic = "force-dynamic";
@@ -104,14 +108,24 @@ export async function GET(request: NextRequest) {
         const allSources = await fetchBuzzSources();
         const sourceNames = new Map(allSources.map((s) => [s.id, s.name]));
         const llm = await pickCuratedArticleIds(recent, sourceNames);
+        const fallbackIds = fallbackCuratedArticleIds(recent, sourceNames);
         let ids = llm.ids;
         if (ids.length >= 5) {
           curationMethod = "llm";
         } else {
           curationError = llm.error ?? "LLM returned fewer than 5 picks";
-          ids = fallbackCuratedArticleIds(recent, sourceNames);
+          ids = fallbackIds;
           if (ids.length >= 5) curationMethod = "fallback";
         }
+        // Enforce source diversity even when LLM picks are valid.
+        ids = diversifyCuratedArticleIds({
+          preferredIds: ids,
+          candidateIds: fallbackIds,
+          articles: recent,
+          target: 5,
+          maxPerSource: 2,
+          minSources: 3,
+        });
         if (ids.length >= 5) {
           await clearBuzzCuratedRanks();
           const err = await setBuzzCuratedRanksById(ids);
