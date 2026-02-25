@@ -74,7 +74,7 @@ export async function fetchBuzzArticles(limit: number, sourceIds?: string[]): Pr
   const select = "id,source_id,title,url,summary,image_url,published_at,fetched_at,curated_rank";
   const sourceFilter = sourceIds?.length ? `&source_id=in.(${sourceIds.join(",")})` : "";
   // Curated first (rank 1-5), then by recency
-  let path = `${url}/rest/v1/buzz_articles?select=${select}&order=curated_rank.asc.nullslast,published_at.desc.nullslast,fetched_at.desc&limit=${limit}${sourceFilter}`;
+  const path = `${url}/rest/v1/buzz_articles?select=${select}&order=curated_rank.asc.nullslast,published_at.desc.nullslast,fetched_at.desc&limit=${limit}${sourceFilter}`;
   const res = await fetch(path, { headers: headers(key), cache: "no-store" });
   if (!res.ok) return [];
   const all = (await res.json()) as BuzzArticle[];
