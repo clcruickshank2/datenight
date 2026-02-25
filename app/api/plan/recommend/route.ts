@@ -558,6 +558,28 @@ function seededWebCuisineCandidates(criteria: PlanCriteria): Candidate[] {
       });
     }
   }
+  if (cuisineIntent.includes("steakhouse")) {
+    const seeds = [
+      "A5 Steakhouse",
+      "STK Denver",
+      "Urban Farmer Denver",
+      "Steakhouse 10",
+    ];
+    for (let i = 0; i < seeds.length; i++) {
+      const name = seeds[i];
+      out.push({
+        id: `web:seed:steakhouse:${i}:${normalize(name).replace(/\s+/g, "-")}`,
+        name,
+        neighborhood: null,
+        priceLevel: null,
+        bookingUrl: `https://duckduckgo.com/?q=${encodeURIComponent(`${name} denver reservations`)}`,
+        notes: "Cuisine-seeded live web candidate",
+        source: "web",
+        tagsText: "steakhouse steak",
+        tags: ["steakhouse", "steak"],
+      });
+    }
+  }
   return out;
 }
 
@@ -766,6 +788,7 @@ export async function POST(req: NextRequest) {
   }
   const mode = body.mode ?? "default";
   const offset = typeof body.offset === "number" ? body.offset : 0;
+  const requestedCount = mode === "tighten" ? 2 : 3;
 
   let profile;
   let restaurants;
@@ -814,13 +837,14 @@ export async function POST(req: NextRequest) {
 
   let sourceMode: "db" | "hybrid" = "db";
   let webAdded = 0;
+  const preWebCount = workingCandidates.length;
   const needWebAugmentation =
     mode === "broaden" ||
-    workingCandidates.length < 6 ||
+    workingCandidates.length < requestedCount ||
     baseConfidence < 0.65;
   if (needWebAugmentation) {
     const webCandidates = await webAugment(normalizedCriteria);
-    webAdded = webCandidates.length;
+    webAdded = webCandidates.filter((w) => !workingCandidates.some((c) => normalize(c.name) === normalize(w.name))).length;
     if (webCandidates.length > 0) {
       workingCandidates = dedupeCandidates([...workingCandidates, ...webCandidates]);
       sourceMode = "hybrid";
@@ -829,48 +853,72 @@ export async function POST(req: NextRequest) {
 
   const rerank = await rerankWithLlm(normalizedCriteria, workingCandidates);
   let recommendations: Recommendation[] = rerank.picks;
-  if (recommendations.length === 0) {
-    const ranked = workingCandidates
-      .map((c) => ({
+  const ranked = workingCandidates
+    .map((c) => ({
+      c,
+      ...scoreCandidate(
         c,
-        ...scoreCandidate(
-          c,
-          normalizedCriteria,
-          (profile.neighborhoods || []).map(normalize),
-          profile.price_min,
-          profile.price_max
-        ),
-      }))
-      .sort((a, b) => b.score - a.score);
-    const start = workingCandidates.length > 0 ? offset % Math.max(1, ranked.length) : 0;
-    const rotated = ranked.slice(start).concat(ranked.slice(0, start));
-    recommendations = rotated.slice(0, 3).map((r) => ({
-      id: r.c.id,
-      name: r.c.name,
-      neighborhood: r.c.neighborhood,
-      priceLevel: r.c.priceLevel,
-      bookingUrl: r.c.bookingUrl,
-      source: r.c.source,
-      reason: buildContextualReason(
-        r.c,
         normalizedCriteria,
-        cuisineIntentFromTags(normalizedCriteria.vibeTags ?? []).filter((cuisine) =>
-          (CUISINE_SYNONYMS[cuisine] ?? [cuisine]).some((k) =>
-            normalize(`${r.c.name} ${r.c.neighborhood ?? ""} ${r.c.notes ?? ""} ${r.c.tagsText}`).includes(normalize(k))
-          )
-        ),
-        Boolean(
-          normalize(r.c.neighborhood ?? "") &&
-            (profile.neighborhoods || [])
-              .map(normalize)
-              .some((n) => normalize(r.c.neighborhood ?? "").includes(n) || n.includes(normalize(r.c.neighborhood ?? "")))
+        (profile.neighborhoods || []).map(normalize),
+        profile.price_min,
+        profile.price_max
+      ),
+    }))
+    .sort((a, b) => b.score - a.score);
+  const start = workingCandidates.length > 0 ? offset % Math.max(1, ranked.length) : 0;
+  const rotated = ranked.slice(start).concat(ranked.slice(0, start));
+  const fallbackRecommendations = rotated.map((r) => ({
+    id: r.c.id,
+    name: r.c.name,
+    neighborhood: r.c.neighborhood,
+    priceLevel: r.c.priceLevel,
+    bookingUrl: r.c.bookingUrl,
+    source: r.c.source,
+    reason: buildContextualReason(
+      r.c,
+      normalizedCriteria,
+      cuisineIntentFromTags(normalizedCriteria.vibeTags ?? []).filter((cuisine) =>
+        (CUISINE_SYNONYMS[cuisine] ?? [cuisine]).some((k) =>
+          normalize(`${r.c.name} ${r.c.neighborhood ?? ""} ${r.c.notes ?? ""} ${r.c.tagsText}`).includes(normalize(k))
         )
       ),
-      tradeoff: buildContextualTradeoff(r.c, normalizedCriteria),
-      googleRating: null,
-      ratingSource: null,
-    }));
+      Boolean(
+        normalize(r.c.neighborhood ?? "") &&
+          (profile.neighborhoods || [])
+            .map(normalize)
+            .some((n) => normalize(r.c.neighborhood ?? "").includes(n) || n.includes(normalize(r.c.neighborhood ?? "")))
+      )
+    ),
+    tradeoff: buildContextualTradeoff(r.c, normalizedCriteria),
+    googleRating: null,
+    ratingSource: null,
+  }));
+
+  // If rerank gives too few picks, top up from deterministic ranking.
+  if (recommendations.length < requestedCount) {
+    const seen = new Set(recommendations.map((r) => normalize(r.name)));
+    for (const f of fallbackRecommendations) {
+      const key = normalize(f.name);
+      if (seen.has(key)) continue;
+      recommendations.push(f);
+      seen.add(key);
+      if (recommendations.length >= requestedCount) break;
+    }
   }
+
+  // Broaden mode should actively add options beyond narrow filtered set.
+  if (mode === "broaden" && recommendations.length < 3) {
+    const seen = new Set(recommendations.map((r) => normalize(r.name)));
+    for (const f of fallbackRecommendations) {
+      const key = normalize(f.name);
+      if (seen.has(key)) continue;
+      recommendations.push(f);
+      seen.add(key);
+      if (recommendations.length >= 3) break;
+    }
+  }
+
+  recommendations = recommendations.slice(0, mode === "broaden" ? Math.max(3, requestedCount) : requestedCount);
 
   const ratingsMap = await fetchBuzzRatingsByName(recommendations.map((r) => r.name));
   recommendations = recommendations.map((r) => {
@@ -914,6 +962,8 @@ export async function POST(req: NextRequest) {
       constraintRelaxed,
       googleLiveEnrichedCount: placesEnrichment.enrichedCount,
       hasGoogleMapsKey: Boolean(process.env.GOOGLE_MAPS_API_KEY),
+      requestedCount,
+      preWebCount,
     },
   });
 }

@@ -43,6 +43,8 @@ type RecommendResponse = {
     constraintRelaxed?: boolean;
     googleLiveEnrichedCount?: number;
     hasGoogleMapsKey?: boolean;
+    requestedCount?: number;
+    preWebCount?: number;
   };
 };
 
@@ -385,7 +387,7 @@ export function PlanClient({ profile }: Props) {
     setConfidence(data.confidence ?? 0);
     setSourceMode(data.sourceMode ?? "db");
     setRecDebug(
-      `mode=${data.debug.mode} · base=${data.debug.baseCandidateCount} · filtered=${data.debug.filteredCandidateCount} · working=${data.debug.workingCandidateCount} · webAdded=${data.debug.webAdded} · llmRerank=${String(data.debug.llmRerankUsed)} · relaxed=${String(data.debug.constraintRelaxed ?? false)} · googleLive=${data.debug.googleLiveEnrichedCount ?? 0} · hasMapsKey=${String(data.debug.hasGoogleMapsKey ?? false)}`
+      `mode=${data.debug.mode} · base=${data.debug.baseCandidateCount} · filtered=${data.debug.filteredCandidateCount} · preWeb=${data.debug.preWebCount ?? "n/a"} · working=${data.debug.workingCandidateCount} · webAdded=${data.debug.webAdded} · llmRerank=${String(data.debug.llmRerankUsed)} · relaxed=${String(data.debug.constraintRelaxed ?? false)} · requested=${data.debug.requestedCount ?? 3} · googleLive=${data.debug.googleLiveEnrichedCount ?? 0} · hasMapsKey=${String(data.debug.hasGoogleMapsKey ?? false)}`
     );
   };
 
@@ -719,7 +721,7 @@ export function PlanClient({ profile }: Props) {
       <section>
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-lg font-medium text-slate-900">
-            {hasAnyCriteria ? "Top 3 high-confidence picks" : "Recommendations"}
+            {hasAnyCriteria ? `Top ${Math.max(1, recommendations.length || 3)} high-confidence picks` : "Recommendations"}
           </h2>
           <div className="text-xs text-slate-500">
             Confidence: {Math.round(confidence * 100)}% · Source: {sourceMode === "hybrid" ? "DB + Live web" : "DB"}
@@ -727,7 +729,7 @@ export function PlanClient({ profile }: Props) {
         </div>
         <div className="mt-2 flex flex-wrap gap-2">
           <button className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50" onClick={() => void runAction("regenerate")}>Regenerate Top 3</button>
-          <button className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50" onClick={() => void runAction("tighten")}>Tighten constraints</button>
+          <button className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50" onClick={() => void runAction("tighten")}>Tighten recommendation</button>
           <button className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50" onClick={() => void runAction("broaden")}>Broaden search</button>
         </div>
         <p className="mt-2 text-xs text-slate-500">Recommend debug: {recDebug}</p>

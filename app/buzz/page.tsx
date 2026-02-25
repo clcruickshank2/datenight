@@ -26,6 +26,20 @@ function decodeHtmlEntities(input: string): string {
     .replace(/&#39;/g, "'");
 }
 
+function cleanText(input: string): string {
+  return decodeHtmlEntities(input)
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function shouldShowArticleImage(sourceId: string, imageUrl: string | null): boolean {
+  // Reddit feed thumbnails are often unreliable/hotlink-blocked.
+  if (sourceId === "reddit-denverfood") return false;
+  if (!imageUrl) return false;
+  return /^https?:\/\//i.test(imageUrl);
+}
+
 function formatPriceLevel(priceLevel: number | null): string {
   if (priceLevel == null) return "—";
   const n = Math.max(1, Math.min(4, Math.round(priceLevel)));
@@ -94,16 +108,16 @@ export default async function BuzzPage() {
                     rel="noopener noreferrer"
                     className="shrink-0"
                   >
-                    {a.image_url ? (
+                    {shouldShowArticleImage(a.source_id, a.image_url) ? (
                       <img
-                        src={a.image_url}
+                        src={a.image_url ?? undefined}
                         alt=""
                         className="h-24 w-full rounded-lg object-cover sm:h-28 sm:w-40"
                       />
                     ) : (
                       <div className="flex h-24 w-full items-center justify-center rounded-lg bg-gradient-to-br from-slate-100 to-slate-200 px-3 text-center sm:h-28 sm:w-40">
                         <span className="text-xs font-medium uppercase tracking-wide text-slate-600">
-                          {decodeHtmlEntities(sourceMap.get(a.source_id) ?? a.source_id)}
+                          {cleanText(sourceMap.get(a.source_id) ?? a.source_id)}
                         </span>
                       </div>
                     )}
@@ -115,10 +129,10 @@ export default async function BuzzPage() {
                       rel="noopener noreferrer"
                       className="font-medium text-slate-900 hover:text-teal-700 hover:underline"
                     >
-                      {decodeHtmlEntities(a.title)}
+                      {cleanText(a.title)}
                     </a>
                     <div className="mt-1 text-sm text-slate-500">
-                      {decodeHtmlEntities(sourceMap.get(a.source_id) ?? a.source_id)}
+                      {cleanText(sourceMap.get(a.source_id) ?? a.source_id)}
                       {a.published_at && (
                         <>
                           {" · "}
@@ -132,7 +146,7 @@ export default async function BuzzPage() {
                     </div>
                     {a.summary && (
                       <p className="mt-2 line-clamp-2 text-sm text-slate-600">
-                        {decodeHtmlEntities(a.summary)}
+                        {cleanText(a.summary)}
                       </p>
                     )}
                   </div>
@@ -154,7 +168,7 @@ export default async function BuzzPage() {
           </div>
         ) : (
           <div className="mt-4 overflow-x-auto">
-            <table className="w-full min-w-[760px] border-collapse text-sm">
+            <table className="w-full min-w-[980px] border-collapse text-sm">
               <thead>
                 <tr className="border-b border-slate-200 text-left text-slate-500">
                   <th className="py-2 pr-2 font-medium">Restaurant</th>
@@ -211,7 +225,7 @@ export default async function BuzzPage() {
                         "—"
                       )}
                     </td>
-                    <td className="max-w-[320px] py-3 pr-2 text-slate-600 line-clamp-3">
+                    <td className="max-w-[460px] py-3 pr-2 text-slate-600 line-clamp-4">
                       {r.overview ?? "—"}
                     </td>
                     <td className="py-3 text-right">
