@@ -116,3 +116,69 @@ export async function insertRestaurants(rows: { name: string; neighborhood?: str
   }
   return {};
 }
+
+// --- Availability checks & alerts (monitoring pipeline) ---
+
+export type AvailabilityCheckRow = {
+  profile_id: string;
+  restaurant_id: string;
+  platform: string;
+  party_size: number;
+  search_start: string | null;
+  search_end: string | null;
+  success: boolean;
+  error: string | null;
+  slots: unknown; // jsonb array
+};
+
+export async function insertAvailabilityCheck(row: AvailabilityCheckRow): Promise<{ error?: string }> {
+  const { url, key } = getConfig();
+  const res = await fetch(`${url}/rest/v1/availability_checks`, {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify(row),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    return { error: `Supabase ${res.status}: ${text}` };
+  }
+  return {};
+}
+
+export type AlertRow = {
+  profile_id: string;
+  primary_restaurant_id: string;
+  status: string;
+  channel: string;
+  recommendation: Record<string, unknown>;
+  reasons: string[];
+};
+
+export async function insertAlert(row: AlertRow): Promise<{ error?: string; id?: string }> {
+  const { url, key } = getConfig();
+  const res = await fetch(`${url}/rest/v1/alerts`, {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify(row),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    return { error: `Supabase ${res.status}: ${text}` };
+  }
+  const created = (await res.json()) as { id?: string }[];
+  return { id: created[0]?.id };
+}
+
+export async function updateAlert(id: string, patch: { sent_at?: string; status?: string; twilio_message_sid?: string; error?: string }): Promise<{ error?: string }> {
+  const { url, key } = getConfig();
+  const res = await fetch(`${url}/rest/v1/alerts?id=eq.${id}`, {
+    method: "PATCH",
+    headers: headers(key),
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    return { error: `Supabase ${res.status}: ${text}` };
+  }
+  return {};
+}

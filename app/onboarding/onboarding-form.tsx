@@ -227,7 +227,7 @@ export function OnboardingForm({ profile, existingRestaurantCount }: Props) {
               </button>
             </div>
           ))}
-          <button type="button" onClick={addRestaurant} className="text-sm text-blue-600 hover:underline">
+          <button type="button" onClick={addRestaurant} className="text-sm text-teal-700 hover:underline">
             + Add restaurant
           </button>
         </div>
@@ -238,7 +238,7 @@ export function OnboardingForm({ profile, existingRestaurantCount }: Props) {
       )}
       <button
         type="submit"
-        className="rounded bg-blue-600 text-white px-4 py-2 hover:bg-blue-700"
+        className="btn-primary"
       >
         Save preferences & restaurants
       </button>

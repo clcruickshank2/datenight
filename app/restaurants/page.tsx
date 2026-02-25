@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 export const runtime = "nodejs";
 
 type Restaurant = {
@@ -13,11 +15,14 @@ export default async function RestaurantsPage() {
 
   if (!url || !key) {
     return (
-      <main style={{ padding: 24 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 700 }}>Restaurants</h1>
-        <p style={{ color: "crimson" }}>
-          Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY
-        </p>
+      <main>
+        <h1 className="text-2xl font-semibold text-slate-900">Restaurants</h1>
+        <div className="mt-4 card border-amber-200 bg-amber-50">
+          <p className="text-amber-800">Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY</p>
+        </div>
+        <Link href="/plan" className="mt-4 inline-block text-sm font-medium text-teal-700 hover:underline">
+          ← Make a plan
+        </Link>
       </main>
     );
   }
@@ -36,9 +41,14 @@ export default async function RestaurantsPage() {
   if (!res.ok) {
     const text = await res.text();
     return (
-      <main style={{ padding: 24 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 700 }}>Restaurants</h1>
-        <pre style={{ whiteSpace: "pre-wrap" }}>{text}</pre>
+      <main>
+        <h1 className="text-2xl font-semibold text-slate-900">Restaurants</h1>
+        <div className="mt-4 card">
+          <pre className="whitespace-pre-wrap text-sm text-slate-600">{text}</pre>
+        </div>
+        <Link href="/plan" className="mt-4 inline-block text-sm font-medium text-teal-700 hover:underline">
+          ← Make a plan
+        </Link>
       </main>
     );
   }
@@ -46,16 +56,21 @@ export default async function RestaurantsPage() {
   const restaurants = (await res.json()) as Restaurant[];
 
   return (
-    <main style={{ padding: 24, maxWidth: 800 }}>
-      <h1 style={{ fontSize: 28, fontWeight: 700 }}>Restaurants</h1>
-      <p style={{ marginTop: 8, opacity: 0.8 }}>{restaurants.length} total</p>
+    <main>
+      <div className="mb-4 flex items-center justify-between">
+        <h1 className="text-2xl font-semibold text-slate-900">Restaurants</h1>
+        <Link href="/plan" className="text-sm font-medium text-teal-700 hover:underline">
+          ← Make a plan
+        </Link>
+      </div>
+      <p className="text-slate-500">{restaurants.length} total</p>
 
-      <ul style={{ marginTop: 16, paddingLeft: 18 }}>
+      <ul className="mt-6 space-y-3">
         {restaurants.map((r) => (
-          <li key={r.id} style={{ marginBottom: 10 }}>
-            <div style={{ fontWeight: 600 }}>{r.name}</div>
-            <div style={{ opacity: 0.8, fontSize: 14 }}>
-              {r.neighborhood ?? "—"} • {r.status}
+          <li key={r.id} className="card">
+            <div className="font-medium text-slate-900">{r.name}</div>
+            <div className="text-sm text-slate-500">
+              {r.neighborhood ?? "—"} · {r.status}
             </div>
           </li>
         ))}

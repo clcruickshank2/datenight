@@ -12,14 +12,14 @@ export default async function OnboardingPage() {
   } catch (e) {
     const message = e instanceof Error ? e.message : "Configuration error";
     return (
-      <main className="min-h-screen p-8 max-w-2xl">
-        <h1 className="text-2xl font-bold">Onboarding</h1>
-        <p className="mt-4 text-red-600">{message}</p>
-        <p className="mt-2 text-sm text-gray-600">
-          Set PROFILE_ID (and Supabase env) in your environment.
-        </p>
-        <Link href="/" className="mt-4 inline-block text-blue-600 hover:underline">
-          ← Home
+      <main>
+        <h1 className="text-2xl font-semibold text-slate-900">Onboarding</h1>
+        <div className="mt-4 card border-amber-200 bg-amber-50">
+          <p className="text-amber-800">{message}</p>
+          <p className="mt-2 text-sm text-amber-700">Set PROFILE_ID (and Supabase env) in your environment.</p>
+        </div>
+        <Link href="/plan" className="mt-4 inline-block text-sm font-medium text-teal-700 hover:underline">
+          ← Make a plan
         </Link>
       </main>
     );
@@ -27,25 +27,25 @@ export default async function OnboardingPage() {
 
   if (!profile) {
     return (
-      <main className="min-h-screen p-8 max-w-2xl">
-        <h1 className="text-2xl font-bold">Onboarding</h1>
-        <p className="mt-4 text-gray-600">Profile not found. Check PROFILE_ID.</p>
-        <Link href="/" className="mt-4 inline-block text-blue-600 hover:underline">
-          ← Home
+      <main>
+        <h1 className="text-2xl font-semibold text-slate-900">Onboarding</h1>
+        <p className="mt-4 text-slate-600">Profile not found. Check PROFILE_ID.</p>
+        <Link href="/plan" className="mt-4 inline-block text-sm font-medium text-teal-700 hover:underline">
+          ← Make a plan
         </Link>
       </main>
     );
   }
 
   return (
-    <main className="min-h-screen p-8 max-w-2xl">
+    <main>
       <div className="mb-6 flex items-center gap-4">
-        <Link href="/" className="text-blue-600 hover:underline">
-          ← Home
+        <Link href="/plan" className="text-sm font-medium text-teal-700 hover:underline">
+          ← Make a plan
         </Link>
-        <h1 className="text-2xl font-bold">Onboarding</h1>
+        <h1 className="text-2xl font-semibold text-slate-900">Onboarding</h1>
       </div>
-      <p className="mb-8 text-gray-600">
+      <p className="mb-8 text-slate-600">
         Set your reservation preferences and add restaurants you want to monitor.
       </p>
       <OnboardingForm
