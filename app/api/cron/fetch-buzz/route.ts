@@ -42,6 +42,15 @@ export async function GET(request: NextRequest) {
   for (const source of sources) {
     const feedUrl = source.feed_url;
     if (!feedUrl) continue;
+    if (source.id === "westword") {
+      results.push({
+        source_id: source.id,
+        name: source.name,
+        items: 0,
+        error: "Skipped: feed currently unreliable (404).",
+      });
+      continue;
+    }
 
     try {
       const controller = new AbortController();

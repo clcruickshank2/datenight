@@ -23,13 +23,11 @@ function stripHtml(html: string): string {
 }
 
 function extractTag(xml: string, tag: string): string | null {
-  const open = `<${tag}>`;
-  const close = `</${tag}>`;
-  const start = xml.indexOf(open);
-  if (start === -1) return null;
-  const end = xml.indexOf(close, start);
-  if (end === -1) return null;
-  let raw = xml.slice(start + open.length, end).trim();
+  // Support both <tag>...</tag> and <tag attr="...">...</tag>
+  const re = new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, "i");
+  const m = xml.match(re);
+  if (!m) return null;
+  let raw = m[1].trim();
   if (raw.startsWith("<![CDATA[")) {
     raw = raw.slice(9, raw.endsWith("]]>") ? raw.length - 3 : raw.length);
   }
