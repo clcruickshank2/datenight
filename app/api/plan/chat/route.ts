@@ -185,9 +185,27 @@ ${message}`;
       criteriaPatch.minPrice = swappedMin;
     }
 
-    return Response.json({ assistantMessage, criteriaPatch });
+    return Response.json({
+      assistantMessage,
+      criteriaPatch,
+      debug: {
+        model: "gpt-4o-mini",
+        used_ai: true,
+        has_openai_key: true,
+      },
+    });
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown chat error";
-    return Response.json({ error: message }, { status: 500 });
+    return Response.json(
+      {
+        error: message,
+        debug: {
+          model: "gpt-4o-mini",
+          used_ai: false,
+          has_openai_key: Boolean(process.env.OPENAI_API_KEY),
+        },
+      },
+      { status: 500 }
+    );
   }
 }

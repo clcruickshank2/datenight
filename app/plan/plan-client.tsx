@@ -257,6 +257,26 @@ function getNextPrompt(criteria: PlanCriteria): string | null {
   return null;
 }
 
+function isCriteriaComplete(criteria: PlanCriteria): boolean {
+  return Boolean(
+    criteria.dateStart &&
+      criteria.dateEnd &&
+      criteria.partySize != null &&
+      criteria.vibeTags.length > 0
+  );
+}
+
+function isRecommendationRequest(text: string): boolean {
+  const lower = text.toLowerCase();
+  return /(recommend|recommendation|suggest|best option|what do you recommend)/.test(
+    lower
+  );
+}
+
+function parseVibeInput(value: string): string[] {
+  return uniquePhrases(value.split(/[,;]/));
+}
+
 function applyHardFilters(restaurants: Restaurant[], criteria: PlanCriteria): Restaurant[] {
   const priced = restaurants.filter((r) => {
     if (r.price_level == null) return true;
@@ -381,7 +401,12 @@ export function PlanClient({ profile, restaurants }: Props) {
     },
   ]);
   const [input, setInput] = useState("");
+  const [vibeInput, setVibeInput] = useState(defaultCriteria.vibeTags.join(", "));
   const [isSending, setIsSending] = useState(false);
+  const [lastChatSource, setLastChatSource] = useState<"llm" | "fallback" | null>(
+    null
+  );
+  const [debugInfo, setDebugInfo] = useState<string>("No request sent yet.");
 
   const updateCriteria = (patch: Partial<PlanCriteria>) => {
     setCriteria((c) => {
@@ -421,6 +446,11 @@ export function PlanClient({ profile, restaurants }: Props) {
           maxPrice?: number;
           vibeTagsToAdd?: string[];
         };
+        debug?: {
+          model?: string;
+          used_ai?: boolean;
+          has_openai_key?: boolean;
+        };
       };
       const patch = data.criteriaPatch ?? {};
       const nextCriteria: PlanCriteria = {
@@ -445,11 +475,23 @@ export function PlanClient({ profile, restaurants }: Props) {
         nextCriteria.maxPrice = t;
       }
       setCriteria(nextCriteria);
+      setVibeInput(nextCriteria.vibeTags.join(", "));
+      setLastChatSource("llm");
+      const dbg = data.debug;
+      setDebugInfo(
+        `AI OK · model=${dbg?.model ?? "unknown"} · used_ai=${String(
+          dbg?.used_ai ?? true
+        )} · has_key=${String(dbg?.has_openai_key ?? true)}`
+      );
 
-      const botText =
-        data.assistantMessage?.trim() ||
-        getNextPrompt(nextCriteria) ||
-        "Got it. I updated your criteria and recommendations.";
+      const nextPrompt = getNextPrompt(nextCriteria);
+      const wantsRecommendations = isRecommendationRequest(text);
+      const botText = nextPrompt
+        ? nextPrompt
+        : wantsRecommendations || isCriteriaComplete(nextCriteria)
+          ? "Perfect. I have enough context and refreshed your top recommendations below."
+          : data.assistantMessage?.trim() ||
+            "Got it. I updated your criteria and recommendations.";
       setMessages((m) => [...m, { role: "bot", text: botText }]);
     } catch {
       const parsed = parseMessageForCriteria(text);
@@ -470,14 +512,20 @@ export function PlanClient({ profile, restaurants }: Props) {
         nextCriteria.maxPrice = t;
       }
       setCriteria(nextCriteria);
+      setVibeInput(nextCriteria.vibeTags.join(", "));
+      setLastChatSource("fallback");
+      setDebugInfo("Fallback parser used (AI endpoint unavailable or errored).");
       const nextPrompt = getNextPrompt(nextCriteria);
+      const wantsRecommendations = isRecommendationRequest(text);
       setMessages((m) => [
         ...m,
         {
           role: "bot",
-          text:
-            nextPrompt ??
-            "Got it. I updated your criteria and refreshed recommendations.",
+          text: nextPrompt
+            ? nextPrompt
+            : wantsRecommendations || isCriteriaComplete(nextCriteria)
+              ? "Got it. I have enough context and refreshed your top recommendations below."
+              : "Got it. I updated your criteria and refreshed recommendations.",
         },
       ]);
     } finally {
@@ -547,6 +595,15 @@ export function PlanClient({ profile, restaurants }: Props) {
             {isSending ? "Thinking..." : "Send"}
           </button>
         </div>
+        <p className="mt-2 text-xs text-slate-500">
+          Chat mode:{" "}
+          {lastChatSource === "llm"
+            ? "AI"
+            : lastChatSource === "fallback"
+              ? "fallback parser"
+              : "not sent yet"}
+        </p>
+        <p className="mt-1 text-xs text-slate-500">Debug: {debugInfo}</p>
       </section>
 
       <section className="card border-teal-200 bg-teal-50/30">
@@ -590,12 +647,13 @@ export function PlanClient({ profile, restaurants }: Props) {
             <label className="mb-1 block text-sm font-medium text-slate-700">Vibes / cuisine / dietary tags</label>
             <input
               type="text"
-              value={criteria.vibeTags.join(", ")}
-              onChange={(e) =>
+              value={vibeInput}
+              onChange={(e) => {
+                setVibeInput(e.target.value);
                 updateCriteria({
-                  vibeTags: uniquePhrases(e.target.value.split(/[,;]/)),
-                })
-              }
+                  vibeTags: parseVibeInput(e.target.value),
+                });
+              }}
               placeholder="e.g. romantic, italian, vegetarian"
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-teal-600 focus:outline-none focus:ring-1 focus:ring-teal-600"
             />
