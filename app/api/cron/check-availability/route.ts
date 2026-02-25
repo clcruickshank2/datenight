@@ -34,13 +34,15 @@ function runChecker(restaurant: Restaurant, profile: Profile): Promise<{ success
 }
 
 export async function GET(request: NextRequest) {
-  const secret = process.env.CRON_SECRET;
-  if (process.env.NODE_ENV === "production" && !secret) {
+  const secretRaw = process.env.CRON_SECRET;
+  if (process.env.NODE_ENV === "production" && !secretRaw) {
     return Response.json({ error: "CRON_SECRET missing" }, { status: 500 });
   }
+  const secret = secretRaw?.trim();
   if (secret) {
-    const auth = request.headers.get("authorization");
-    if (auth !== `Bearer ${secret}`) {
+    const auth = request.headers.get("authorization") ?? "";
+    const token = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : "";
+    if (token !== secret) {
       return Response.json({ error: "Unauthorized" }, { status: 401 });
     }
   }

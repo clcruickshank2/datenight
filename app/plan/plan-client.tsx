@@ -26,6 +26,8 @@ const VIBE_KEYWORDS = [
   "quiet",
   "outdoor",
   "date night",
+  "cool",
+  "italian",
 ];
 
 function parseMessageForCriteria(text: string): Partial<PlanCriteria> {
@@ -48,38 +50,75 @@ function parseMessageForCriteria(text: string): Partial<PlanCriteria> {
   const foundVibes = VIBE_KEYWORDS.filter((v) => lower.includes(v));
   if (foundVibes.length) out.vibeTags = foundVibes;
 
-  // When: tonight, tomorrow, next friday, next week (set single date)
+  // When: tonight, tomorrow, next N weeks, next week, next friday, etc.
   const today = new Date();
+  today.setHours(0, 0, 0, 0);
   const yyyy = today.getFullYear();
   const mm = String(today.getMonth() + 1).padStart(2, "0");
   const dd = String(today.getDate()).padStart(2, "0");
   const todayStr = `${yyyy}-${mm}-${dd}`;
 
-  if (/\btonight\b|\btoday\b/.test(lower)) {
+  const addDays = (d: Date, n: number) => {
+    const next = new Date(d);
+    next.setDate(next.getDate() + n);
+    return next.toISOString().slice(0, 10);
+  };
+
+  // "in the next three weeks", "next 3 weeks", "next two weeks"
+  const nextWeeksMatch = lower.match(/\b(?:in the )?next (one|two|three|four|five|1|2|3|4|5)\s*weeks?\b/);
+  if (nextWeeksMatch) {
+    const w = { one: 1, two: 2, three: 3, four: 4, five: 5 }[nextWeeksMatch[1] as keyof object] ?? parseInt(nextWeeksMatch[1], 10) || 2;
+    const days = Math.min(w * 7, 60);
     out.dateStart = todayStr;
-    out.dateEnd = todayStr;
-  } else if (/\btomorrow\b/.test(lower)) {
-    const t = new Date(today);
-    t.setDate(t.getDate() + 1);
-    const ts = t.toISOString().slice(0, 10);
-    out.dateStart = ts;
-    out.dateEnd = ts;
-  } else if (/\bnext week\b/.test(lower)) {
+    out.dateEnd = addDays(today, days);
+  }
+  // "next week" (single week)
+  else if (/\bnext week\b/.test(lower) && !out.dateStart) {
     const start = new Date(today);
     start.setDate(start.getDate() + 7);
     const end = new Date(start);
     end.setDate(end.getDate() + 6);
     out.dateStart = start.toISOString().slice(0, 10);
     out.dateEnd = end.toISOString().slice(0, 10);
-  } else if (/\bnext friday\b/.test(lower)) {
+  }
+  // "next month"
+  else if (/\bnext month\b/.test(lower) && !out.dateStart) {
+    out.dateStart = todayStr;
+    out.dateEnd = addDays(today, 31);
+  }
+  // "tonight" / "today"
+  else if (/\btonight\b|\btoday\b/.test(lower) && !out.dateStart) {
+    out.dateStart = todayStr;
+    out.dateEnd = todayStr;
+  }
+  // "tomorrow"
+  else if (/\btomorrow\b/.test(lower) && !out.dateStart) {
+    const ts = addDays(today, 1);
+    out.dateStart = ts;
+    out.dateEnd = ts;
+  }
+  // "next Friday" / "this Friday"
+  else if (/\b(?:next|this)\s*(friday|saturday|sunday|monday|tuesday|wednesday|thursday)\b/.test(lower) && !out.dateStart) {
+    const days: Record<string, number> = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
+    const match = lower.match(/\b(?:next|this)\s*(friday|saturday|sunday|monday|tuesday|wednesday|thursday)\b/);
+    const targetDay = match ? days[match[1]] : 5;
     const d = new Date(today);
-    const day = d.getDay();
-    const daysUntilFri = (5 - day + 7) % 7;
-    if (daysUntilFri === 0) d.setDate(d.getDate() + 7);
-    else d.setDate(d.getDate() + daysUntilFri);
+    let diff = (targetDay - d.getDay() + 7) % 7;
+    if (lower.includes("next ") && diff === 0) diff = 7;
+    d.setDate(d.getDate() + diff);
     const ts = d.toISOString().slice(0, 10);
     out.dateStart = ts;
     out.dateEnd = ts;
+  }
+  // "Friday or Saturday" with "weeks" → treat as date range
+  else if (/\b(friday|saturday|sunday|monday|tuesday|wednesday|thursday)\b/.test(lower) && /\bweeks?\b/.test(lower) && !out.dateStart) {
+    out.dateStart = todayStr;
+    out.dateEnd = addDays(today, 21);
+  }
+  // Fallback: user clearly mentioned time but we didn't parse — set next 2 weeks so we don't loop asking "when?"
+  else if (!out.dateStart && /\b(when|friday|saturday|sunday|monday|tuesday|wednesday|thursday|week|tonight|tomorrow|next|month)\b/.test(lower)) {
+    out.dateStart = todayStr;
+    out.dateEnd = addDays(today, 14);
   }
 
   return out;
@@ -92,12 +131,18 @@ function getNextPrompt(criteria: PlanCriteria): string | null {
   return null;
 }
 
+/** Normalize for match: "date-night" and "date night" both become "date night". */
+function normalizeVibe(s: string): string {
+  return s.toLowerCase().trim().replace(/-/g, " ");
+}
+
 function filterRestaurants(restaurants: Restaurant[], criteria: PlanCriteria): Restaurant[] {
   if (criteria.vibeTags.length === 0) return restaurants;
-  const lowerVibes = criteria.vibeTags.map((v) => v.toLowerCase());
+  const normalizedUserVibes = criteria.vibeTags.map(normalizeVibe).filter(Boolean);
   return restaurants.filter((r) => {
-    const tags = (r.vibe_tags || []).map((t) => t.toLowerCase());
-    return lowerVibes.some((v) => tags.includes(v));
+    const tags = (r.vibe_tags || []).map(normalizeVibe);
+    if (tags.length === 0) return true; // no tags on restaurant → include (don't hide untagged places)
+    return normalizedUserVibes.some((v) => tags.includes(v));
   });
 }
 

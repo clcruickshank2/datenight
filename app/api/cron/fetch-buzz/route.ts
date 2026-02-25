@@ -5,9 +5,9 @@ import {
   fetchRecentBuzzArticlesForCuration,
   upsertBuzzArticles,
   clearBuzzCuratedRanks,
-  setBuzzCuratedRanks,
+  setBuzzCuratedRanksById,
 } from "@/lib/buzz-server";
-import { pickCuratedArticleUrls } from "@/lib/buzz-curate";
+import { pickCuratedArticleIds } from "@/lib/buzz-curate";
 import { parseRss, normalizePubDate } from "@/lib/rss";
 
 export const dynamic = "force-dynamic";
@@ -16,13 +16,15 @@ export const maxDuration = 60;
 const MAX_ITEMS_PER_FEED = 30;
 
 export async function GET(request: NextRequest) {
-  const secret = process.env.CRON_SECRET;
-  if (process.env.NODE_ENV === "production" && !secret) {
+  const secretRaw = process.env.CRON_SECRET;
+  if (process.env.NODE_ENV === "production" && !secretRaw) {
     return Response.json({ error: "CRON_SECRET missing" }, { status: 500 });
   }
+  const secret = secretRaw?.trim();
   if (secret) {
-    const auth = request.headers.get("authorization");
-    if (auth !== `Bearer ${secret}`) {
+    const auth = request.headers.get("authorization") ?? "";
+    const token = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : "";
+    if (token !== secret) {
       return Response.json({ error: "Unauthorized" }, { status: 401 });
     }
   }
@@ -82,7 +84,7 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  // Curate: have OpenAI pick 5 best articles (requires OPENAI_API_KEY)
+  // Curate: have OpenAI pick 5 best articles by id (requires OPENAI_API_KEY)
   let curated = 0;
   if (process.env.OPENAI_API_KEY) {
     try {
@@ -90,11 +92,11 @@ export async function GET(request: NextRequest) {
       if (recent.length >= 5) {
         const allSources = await fetchBuzzSources();
         const sourceNames = new Map(allSources.map((s) => [s.id, s.name]));
-        const urls = await pickCuratedArticleUrls(recent, sourceNames);
-        if (urls.length >= 5) {
+        const ids = await pickCuratedArticleIds(recent, sourceNames);
+        if (ids.length >= 5) {
           await clearBuzzCuratedRanks();
-          const err = await setBuzzCuratedRanks(urls);
-          if (!err.error) curated = urls.length;
+          const err = await setBuzzCuratedRanksById(ids);
+          if (!err.error) curated = ids.length;
         }
       }
     } catch {

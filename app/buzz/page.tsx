@@ -2,24 +2,29 @@ import {
   fetchBuzzArticles,
   fetchBuzzSources,
   fetchBuzzPreferencesSourceIds,
+  fetchBuzzRestaurants,
 } from "@/lib/buzz-server";
 
 const CURATED_LIMIT = 5;
+const TRENDING_LIMIT = 15;
 
 export default async function BuzzPage() {
   let articles: Awaited<ReturnType<typeof fetchBuzzArticles>> = [];
   let sources: Awaited<ReturnType<typeof fetchBuzzSources>> = [];
   let sourceIds: string[] | null = null;
+  let restaurants: Awaited<ReturnType<typeof fetchBuzzRestaurants>> = [];
 
   try {
     sources = await fetchBuzzSources();
     sourceIds = await fetchBuzzPreferencesSourceIds();
     articles = await fetchBuzzArticles(CURATED_LIMIT, sourceIds ?? undefined);
-  } catch (e) {
+    restaurants = await fetchBuzzRestaurants(TRENDING_LIMIT);
+  } catch {
     // Config or Supabase missing; show empty state
   }
 
   const sourceMap = new Map(sources.map((s) => [s.id, s.name]));
+  const hasCuratedPicks = articles.some((a) => a.curated_rank != null);
 
   return (
     <main>
@@ -39,7 +44,14 @@ export default async function BuzzPage() {
         </div>
       ) : (
         <section className="mt-8 space-y-6">
-          <h2 className="text-lg font-medium text-slate-900">Curated this week</h2>
+          <h2 className="text-lg font-medium text-slate-900">
+            {hasCuratedPicks ? "Editor’s picks this week" : "Latest articles"}
+          </h2>
+          {!hasCuratedPicks && (
+            <p className="text-sm text-slate-500">
+              Run the weekly cron with OPENAI_API_KEY set to get 5 curated picks instead of just the latest.
+            </p>
+          )}
           <ul className="space-y-4">
             {articles.map((a) => (
               <li key={a.id} className="card">
@@ -91,9 +103,70 @@ export default async function BuzzPage() {
         </section>
       )}
 
-      <p className="mt-8 text-sm text-slate-500">
-        Trending restaurants (from these articles) coming soon.
-      </p>
+      <section className="mt-10">
+        <h2 className="text-lg font-medium text-slate-900">Trending restaurants</h2>
+        <p className="mt-1 text-sm text-slate-500">
+          Restaurants getting buzz in Denver food coverage. We’ll extract these from articles soon.
+        </p>
+        {restaurants.length === 0 ? (
+          <div className="mt-4 card border-dashed border-slate-300 bg-slate-50/50">
+            <p className="text-slate-600">No trending restaurants yet. Once we add LLM extraction from articles, they’ll appear here.</p>
+          </div>
+        ) : (
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full min-w-[480px] border-collapse text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 text-left text-slate-500">
+                  <th className="py-2 pr-2 font-medium">Restaurant</th>
+                  <th className="py-2 pr-2 font-medium">Overview</th>
+                  <th className="py-2 w-16 font-medium text-right">Rating</th>
+                </tr>
+              </thead>
+              <tbody>
+                {restaurants.map((r) => (
+                  <tr key={r.id} className="border-b border-slate-100">
+                    <td className="py-3 pr-2">
+                      <div className="flex items-center gap-2">
+                        {r.image_url && (
+                          <img
+                            src={r.image_url}
+                            alt=""
+                            className="h-10 w-10 shrink-0 rounded object-cover"
+                          />
+                        )}
+                        <span>
+                          {r.website_url ? (
+                            <a
+                              href={r.website_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-medium text-slate-900 hover:text-teal-700 hover:underline"
+                            >
+                              {r.name}
+                            </a>
+                          ) : (
+                            <span className="font-medium text-slate-900">{r.name}</span>
+                          )}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="max-w-[280px] py-3 pr-2 text-slate-600 line-clamp-2">
+                      {r.overview ?? "—"}
+                    </td>
+                    <td className="py-3 text-right">
+                      {r.google_rating != null ? (
+                        <span className="text-slate-700">{r.google_rating}</span>
+                      ) : (
+                        <span className="text-slate-400">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
     </main>
   );
 }

@@ -109,11 +109,11 @@ export async function clearBuzzCuratedRanks(): Promise<{ error?: string }> {
   return {};
 }
 
-/** Set curated_rank 1-5 for articles by url (order = rank). */
-export async function setBuzzCuratedRanks(orderedUrls: string[]): Promise<{ error?: string }> {
+/** Set curated_rank 1-5 for articles by id (order = rank). */
+export async function setBuzzCuratedRanksById(orderedIds: string[]): Promise<{ error?: string }> {
   const { url, key } = getConfig();
-  for (let i = 0; i < Math.min(5, orderedUrls.length); i++) {
-    const res = await fetch(`${url}/rest/v1/buzz_articles?url=eq.${encodeURIComponent(orderedUrls[i])}`, {
+  for (let i = 0; i < Math.min(5, orderedIds.length); i++) {
+    const res = await fetch(`${url}/rest/v1/buzz_articles?id=eq.${orderedIds[i]}`, {
       method: "PATCH",
       headers: headers(key),
       body: JSON.stringify({ curated_rank: i + 1 }),
@@ -124,6 +124,24 @@ export async function setBuzzCuratedRanks(orderedUrls: string[]): Promise<{ erro
     }
   }
   return {};
+}
+
+/** Trending restaurants (from buzz_restaurants table; filled later by LLM extraction). */
+export type BuzzRestaurant = {
+  id: string;
+  name: string;
+  website_url: string | null;
+  image_url: string | null;
+  overview: string | null;
+  google_rating: number | null;
+};
+
+export async function fetchBuzzRestaurants(limit: number): Promise<BuzzRestaurant[]> {
+  const { url, key } = getConfig();
+  const path = `${url}/rest/v1/buzz_restaurants?select=id,name,website_url,image_url,overview,google_rating&order=fetched_at.desc&limit=${limit}`;
+  const res = await fetch(path, { headers: headers(key), cache: "no-store" });
+  if (!res.ok) return [];
+  return (await res.json()) as BuzzRestaurant[];
 }
 
 /** Profile's enabled source ids for curation. If none, use all enabled source ids. */
