@@ -31,6 +31,36 @@ export type TrendingExtractionResult = {
   error?: string;
 };
 
+function parseJsonArrayFromModel(content: string): unknown[] {
+  const trimmed = content.trim();
+  // 1) direct parse first
+  try {
+    const direct = JSON.parse(trimmed);
+    if (Array.isArray(direct)) return direct;
+  } catch {
+    // continue
+  }
+
+  // 2) fenced block: ```json ... ``` or ``` ... ```
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenceMatch?.[1]) {
+    const fenced = fenceMatch[1].trim();
+    const parsed = JSON.parse(fenced);
+    if (Array.isArray(parsed)) return parsed;
+  }
+
+  // 3) first JSON array slice fallback
+  const start = trimmed.indexOf("[");
+  const end = trimmed.lastIndexOf("]");
+  if (start >= 0 && end > start) {
+    const sliced = trimmed.slice(start, end + 1);
+    const parsed = JSON.parse(sliced);
+    if (Array.isArray(parsed)) return parsed;
+  }
+
+  throw new Error("Model did not return a valid JSON array");
+}
+
 /**
  * Returns 5 article IDs in recommendation order (best first), or [] if no key or error.
  * Uses IDs so we never miss due to URL mismatch; prompt favors editorial sources.
@@ -102,12 +132,12 @@ Return a JSON array of exactly 5 article IDs in order of recommendation (best fi
     const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
     const content = data.choices?.[0]?.message?.content?.trim();
     if (!content) return { ids: [], error: "OpenAI response missing content" };
-    const ids = JSON.parse(content) as string[];
-    if (!Array.isArray(ids)) return { ids: [], error: "OpenAI response was not a JSON array" };
+    const ids = parseJsonArrayFromModel(content) as string[];
     const validIds = new Set(articles.map((a) => a.id));
-    return {
-      ids: ids.slice(0, PICK).filter((id) => typeof id === "string" && validIds.has(id)),
-    };
+    const filtered = ids
+      .map((id) => (typeof id === "string" ? id.trim() : ""))
+      .filter((id) => id.length > 0 && validIds.has(id));
+    return { ids: filtered.slice(0, PICK) };
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown OpenAI error";
     return { ids: [], error: message };
@@ -324,14 +354,11 @@ Return ONLY valid JSON array of objects:
     const content = data.choices?.[0]?.message?.content?.trim();
     if (!content) return { restaurants: [], error: "OpenAI response missing content" };
 
-    const parsed = JSON.parse(content) as {
+    const parsed = parseJsonArrayFromModel(content) as {
       name?: string;
       overview?: string;
       source_article_ids?: string[];
     }[];
-    if (!Array.isArray(parsed)) {
-      return { restaurants: [], error: "OpenAI response was not an array" };
-    }
 
     const validArticleIds = new Set(articles.map((a) => a.id));
     const out = parsed

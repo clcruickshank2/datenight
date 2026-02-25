@@ -22,6 +22,41 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const MAX_ITEMS_PER_FEED = 30;
+const ARTICLE_FETCH_TIMEOUT_MS = 10_000;
+
+function stripHtmlToText(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function fetchArticleExcerpt(url: string): Promise<string> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), ARTICLE_FETCH_TIMEOUT_MS);
+    const res = await fetch(url, {
+      headers: { "User-Agent": "RezSimple-Buzz/1.0" },
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!res.ok) return "";
+    const html = await res.text();
+    const text = stripHtmlToText(html);
+    // Keep prompt size reasonable; enough context for restaurant extraction
+    return text.slice(0, 3500);
+  } catch {
+    return "";
+  }
+}
 
 export async function GET(request: NextRequest) {
   const secretRaw = process.env.CRON_SECRET;
@@ -161,7 +196,20 @@ export async function GET(request: NextRequest) {
       if (curatedArticles.length > 0) {
         const allSources = await fetchBuzzSources();
         const sourceNames = new Map(allSources.map((s) => [s.id, s.name]));
-        const extracted = await extractTrendingRestaurants(curatedArticles, sourceNames);
+        const excerpts = await Promise.all(
+          curatedArticles.map(async (a) => ({
+            id: a.id,
+            excerpt: await fetchArticleExcerpt(a.url),
+          }))
+        );
+        const excerptById = new Map(excerpts.map((x) => [x.id, x.excerpt]));
+
+        const enriched = curatedArticles.map((a) => ({
+          ...a,
+          summary: `${a.summary ?? ""} ${excerptById.get(a.id) ?? ""}`.trim().slice(0, 4000),
+        }));
+
+        const extracted = await extractTrendingRestaurants(enriched, sourceNames);
         if (extracted.restaurants.length > 0) {
           const clearErr = await clearBuzzRestaurants();
           if (clearErr.error) {
