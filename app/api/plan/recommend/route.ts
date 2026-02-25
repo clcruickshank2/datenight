@@ -285,6 +285,7 @@ function seededWebCuisineCandidates(criteria: PlanCriteria): Candidate[] {
 }
 
 async function webAugment(criteria: PlanCriteria): Promise<Candidate[]> {
+  const seeded = seededWebCuisineCandidates(criteria);
   const tags = unique(criteria.vibeTags ?? []);
   const cuisineIntent = cuisineIntentFromTags(tags);
   const queryCore = cuisineIntent.length > 0 ? cuisineIntent.join(" ") : tags.length > 0 ? tags.join(" ") : "restaurants";
@@ -295,10 +296,10 @@ async function webAugment(criteria: PlanCriteria): Promise<Candidate[]> {
       headers: { "User-Agent": "RezSimple/1.0" },
       cache: "no-store",
     });
-    if (!res.ok) return [];
+    if (!res.ok) return seeded;
     const html = await res.text();
     const matches = [...html.matchAll(/<a[^>]*(?:class=\"result__a\"|class=\"result-link\")[^>]*href=\"([^\"]+)\"[^>]*>(.*?)<\/a>/gi)];
-    const picks: Candidate[] = [...seededWebCuisineCandidates(criteria)];
+    const picks: Candidate[] = [...seeded];
     for (let i = 0; i < Math.min(matches.length, 16); i++) {
       const hrefRaw = matches[i][1] ?? "";
       const href = decodeDuckDuckGoHref(hrefRaw);
@@ -317,9 +318,10 @@ async function webAugment(criteria: PlanCriteria): Promise<Candidate[]> {
         tagsText: queryCore,
       });
     }
-    return dedupeCandidates(picks).slice(0, 12);
+    const out = dedupeCandidates(picks).slice(0, 12);
+    return out.length > 0 ? out : seeded;
   } catch {
-    return seededWebCuisineCandidates(criteria);
+    return seeded;
   }
 }
 

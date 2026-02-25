@@ -90,8 +90,31 @@ function stripKnownNoisePhrases(text: string): string {
     .trim();
 }
 
+async function fetchReaderText(url: string): Promise<string> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), ARTICLE_FETCH_TIMEOUT_MS);
+    const readerUrl = `https://r.jina.ai/http://${url.replace(/^https?:\/\//i, "")}`;
+    const res = await fetch(readerUrl, {
+      headers: { "User-Agent": "RezSimple-Buzz/1.0" },
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!res.ok) return "";
+    const raw = await res.text();
+    // Reader output is plain text/markdown-ish, not raw HTML.
+    return stripKnownNoisePhrases(raw).slice(0, ARTICLE_EXCERPT_MAX_CHARS);
+  } catch {
+    return "";
+  }
+}
+
 async function fetchArticleExcerpt(url: string): Promise<string> {
   try {
+    const readerText = await fetchReaderText(url);
+    if (readerText.length > 400) return readerText;
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), ARTICLE_FETCH_TIMEOUT_MS);
     const res = await fetch(url, {

@@ -367,14 +367,14 @@ export async function extractTrendingRestaurants(
     id: a.id,
     source: sourceNames.get(a.source_id) ?? a.source_id,
     title: a.title,
-    summary: (a.summary ?? "").slice(0, 1600),
+    summary: (a.summary ?? "").slice(0, 5000),
     url: a.url,
   }));
   const refToId = new Map(list.map((a) => [a.ref, a.id]));
   const idToRef = new Map(list.map((a) => [a.id, a.ref]));
 
-  const baseContext = `Input articles (ref, source, title, summary, url):
-${list.map((a) => `- ref=${a.ref} | source=${a.source} | title="${a.title}" | summary="${a.summary}" | url=${a.url}`).join("\n")}`;
+  const baseContext = `Input articles (ref, source, title, excerpt, url):
+${list.map((a) => `- ref=${a.ref} | source=${a.source} | title="${a.title}" | excerpt="${a.summary}" | url=${a.url}`).join("\n")}`;
 
   try {
     const strictPrompt = `You are extracting Denver restaurant names from curated articles.
