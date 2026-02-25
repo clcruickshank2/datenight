@@ -273,6 +273,11 @@ function isRecommendationRequest(text: string): boolean {
   );
 }
 
+function wantsDifferentRecommendations(text: string): boolean {
+  const lower = text.toLowerCase();
+  return /(different|another|new)\s+(recommendation|option|pick|one)/.test(lower);
+}
+
 function parseVibeInput(value: string): string[] {
   return uniquePhrases(value.split(/[,;]/));
 }
@@ -407,6 +412,7 @@ export function PlanClient({ profile, restaurants }: Props) {
     null
   );
   const [debugInfo, setDebugInfo] = useState<string>("No request sent yet.");
+  const [recommendationOffset, setRecommendationOffset] = useState(0);
 
   const updateCriteria = (patch: Partial<PlanCriteria>) => {
     setCriteria((c) => {
@@ -428,11 +434,35 @@ export function PlanClient({ profile, restaurants }: Props) {
     setInput("");
     setMessages((m) => [...m, { role: "user", text }]);
 
+    // Optimistic local parse so criteria UI updates immediately while AI call is in flight.
+    const localParsed = parseMessageForCriteria(text);
+    const optimisticCriteria: PlanCriteria = {
+      ...criteria,
+      ...localParsed,
+      vibeTags: uniquePhrases([
+        ...criteria.vibeTags,
+        ...(localParsed.vibeTags ?? []),
+      ]),
+      minPrice: localParsed.minPrice ?? criteria.minPrice,
+      maxPrice: localParsed.maxPrice ?? criteria.maxPrice,
+    };
+    if (
+      optimisticCriteria.minPrice != null &&
+      optimisticCriteria.maxPrice != null &&
+      optimisticCriteria.minPrice > optimisticCriteria.maxPrice
+    ) {
+      const t = optimisticCriteria.minPrice;
+      optimisticCriteria.minPrice = optimisticCriteria.maxPrice;
+      optimisticCriteria.maxPrice = t;
+    }
+    setCriteria(optimisticCriteria);
+    setVibeInput(optimisticCriteria.vibeTags.join(", "));
+
     try {
       const res = await fetch("/api/plan/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, criteria }),
+        body: JSON.stringify({ message: text, criteria: optimisticCriteria }),
       });
       if (!res.ok) throw new Error("chat endpoint failed");
 
@@ -454,14 +484,14 @@ export function PlanClient({ profile, restaurants }: Props) {
       };
       const patch = data.criteriaPatch ?? {};
       const nextCriteria: PlanCriteria = {
-        ...criteria,
-        dateStart: patch.dateStart ?? criteria.dateStart,
-        dateEnd: patch.dateEnd ?? criteria.dateEnd,
-        partySize: patch.partySize ?? criteria.partySize,
-        minPrice: patch.minPrice ?? criteria.minPrice,
-        maxPrice: patch.maxPrice ?? criteria.maxPrice,
+        ...optimisticCriteria,
+        dateStart: patch.dateStart ?? optimisticCriteria.dateStart,
+        dateEnd: patch.dateEnd ?? optimisticCriteria.dateEnd,
+        partySize: patch.partySize ?? optimisticCriteria.partySize,
+        minPrice: patch.minPrice ?? optimisticCriteria.minPrice,
+        maxPrice: patch.maxPrice ?? optimisticCriteria.maxPrice,
         vibeTags: uniquePhrases([
-          ...criteria.vibeTags,
+          ...optimisticCriteria.vibeTags,
           ...(patch.vibeTagsToAdd ?? []),
         ]),
       };
@@ -486,6 +516,9 @@ export function PlanClient({ profile, restaurants }: Props) {
 
       const nextPrompt = getNextPrompt(nextCriteria);
       const wantsRecommendations = isRecommendationRequest(text);
+      if (wantsDifferentRecommendations(text)) {
+        setRecommendationOffset((prev) => prev + 5);
+      }
       const botText = nextPrompt
         ? nextPrompt
         : wantsRecommendations || isCriteriaComplete(nextCriteria)
@@ -494,14 +527,7 @@ export function PlanClient({ profile, restaurants }: Props) {
             "Got it. I updated your criteria and recommendations.";
       setMessages((m) => [...m, { role: "bot", text: botText }]);
     } catch {
-      const parsed = parseMessageForCriteria(text);
-      const nextCriteria: PlanCriteria = {
-        ...criteria,
-        ...parsed,
-        vibeTags: uniquePhrases([...criteria.vibeTags, ...(parsed.vibeTags ?? [])]),
-        minPrice: parsed.minPrice ?? criteria.minPrice,
-        maxPrice: parsed.maxPrice ?? criteria.maxPrice,
-      };
+      const nextCriteria: PlanCriteria = { ...optimisticCriteria };
       if (
         nextCriteria.minPrice != null &&
         nextCriteria.maxPrice != null &&
@@ -517,6 +543,9 @@ export function PlanClient({ profile, restaurants }: Props) {
       setDebugInfo("Fallback parser used (AI endpoint unavailable or errored).");
       const nextPrompt = getNextPrompt(nextCriteria);
       const wantsRecommendations = isRecommendationRequest(text);
+      if (wantsDifferentRecommendations(text)) {
+        setRecommendationOffset((prev) => prev + 5);
+      }
       setMessages((m) => [
         ...m,
         {
@@ -542,7 +571,13 @@ export function PlanClient({ profile, restaurants }: Props) {
     [filteredRestaurants, criteria, profile]
   );
 
-  const topRecommendations = ranked.slice(0, 5);
+  const topRecommendations = useMemo(() => {
+    if (ranked.length <= 5) return ranked;
+    const normalizedOffset = recommendationOffset % ranked.length;
+    const first = ranked.slice(normalizedOffset, normalizedOffset + 5);
+    if (first.length === 5) return first;
+    return [...first, ...ranked.slice(0, 5 - first.length)];
+  }, [ranked, recommendationOffset]);
   const hasAnyCriteria =
     criteria.dateStart ||
     criteria.dateEnd ||
