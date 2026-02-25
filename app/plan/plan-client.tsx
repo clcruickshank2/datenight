@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
-import type { Profile, Restaurant } from "@/lib/supabase-server";
+import type { Profile } from "@/lib/supabase-server";
 
 export type PlanCriteria = {
   dateStart: string;
@@ -15,10 +15,30 @@ export type PlanCriteria = {
 
 type ChatMessage = { role: "user" | "bot"; text: string };
 
-type RankedRecommendation = {
-  restaurant: Restaurant;
-  score: number;
-  reasons: string[];
+type UiRecommendation = {
+  id: string;
+  name: string;
+  neighborhood: string | null;
+  priceLevel: number | null;
+  bookingUrl: string | null;
+  source: "db" | "web";
+  reason: string;
+  tradeoff: string;
+};
+
+type RecommendResponse = {
+  recommendations: UiRecommendation[];
+  confidence: number;
+  sourceMode: "db" | "hybrid";
+  debug: {
+    mode: string;
+    baseCandidateCount: number;
+    filteredCandidateCount: number;
+    workingCandidateCount: number;
+    webAdded: number;
+    llmRerankUsed: boolean;
+    offset: number;
+  };
 };
 
 const PREFERENCE_KEYWORDS = [
@@ -76,17 +96,6 @@ const STOPWORD_PREFS = new Set([
   "of",
   "in",
   "near",
-]);
-
-const HARD_FILTER_TAGS = new Set([
-  "vegetarian",
-  "vegan",
-  "gluten free",
-  "gluten-free",
-  "dairy free",
-  "halal",
-  "kosher",
-  "pescatarian",
 ]);
 
 function normalizePhrase(s: string): string {
@@ -282,110 +291,11 @@ function parseVibeInput(value: string): string[] {
   return uniquePhrases(value.split(/[,;]/));
 }
 
-function applyHardFilters(restaurants: Restaurant[], criteria: PlanCriteria): Restaurant[] {
-  const priced = restaurants.filter((r) => {
-    if (r.price_level == null) return true;
-    if (criteria.minPrice != null && r.price_level < criteria.minPrice) return false;
-    if (criteria.maxPrice != null && r.price_level > criteria.maxPrice) return false;
-    return true;
-  });
-
-  const strictTags = criteria.vibeTags.filter((t) => HARD_FILTER_TAGS.has(t));
-  if (strictTags.length === 0) return priced;
-
-  const strict = priced.filter((r) => {
-    const haystack = normalizePhrase(
-      [r.name, r.neighborhood ?? "", r.notes ?? "", (r.vibe_tags || []).join(" ")].join(" ")
-    );
-    return strictTags.every((tag) => haystack.includes(normalizePhrase(tag)));
-  });
-
-  return strict.length > 0 ? strict : priced;
-}
-
-function scoreRestaurant(
-  restaurant: Restaurant,
-  criteria: PlanCriteria,
-  profile: Profile
-): RankedRecommendation {
-  let score = 0;
-  const reasons: string[] = [];
-
-  const normalizedPrefs = uniquePhrases(criteria.vibeTags);
-  const tagText = uniquePhrases(restaurant.vibe_tags || []).join(" ");
-  const haystack = normalizePhrase(
-    [restaurant.name, restaurant.neighborhood ?? "", restaurant.notes ?? "", tagText].join(" ")
-  );
-
-  const matchedPrefs = normalizedPrefs.filter((pref) => haystack.includes(pref));
-  if (matchedPrefs.length > 0) {
-    score += matchedPrefs.length * 8;
-    reasons.push(`matches: ${matchedPrefs.slice(0, 3).join(", ")}`);
-  }
-
-  const preferredNeighborhoods = (profile.neighborhoods || []).map(normalizePhrase);
-  const restNeighborhood = normalizePhrase(restaurant.neighborhood || "");
-  if (
-    restNeighborhood &&
-    preferredNeighborhoods.some(
-      (n) => restNeighborhood.includes(n) || n.includes(restNeighborhood)
-    )
-  ) {
-    score += 4;
-    reasons.push("in your preferred neighborhood");
-  }
-
-  if (restaurant.price_level != null) {
-    const minPrice = criteria.minPrice ?? profile.price_min;
-    const maxPrice = criteria.maxPrice ?? profile.price_max;
-    if (restaurant.price_level >= minPrice && restaurant.price_level <= maxPrice) {
-      score += 3;
-      reasons.push("within your price range");
-    } else {
-      score -= 3;
-    }
-  }
-
-  if (restaurant.booking_url) {
-    score += 1;
-    reasons.push("has a booking link");
-  }
-
-  if (criteria.partySize != null && criteria.partySize >= 5 && /group|family|share/.test(haystack)) {
-    score += 2;
-    reasons.push("good fit for a larger group");
-  }
-  if (criteria.partySize != null && criteria.partySize <= 2 && /romantic|intimate|date night/.test(haystack)) {
-    score += 2;
-    reasons.push("great for date night");
-  }
-
-  return {
-    restaurant,
-    score,
-    reasons: reasons.slice(0, 3),
-  };
-}
-
-function rankRestaurants(
-  restaurants: Restaurant[],
-  criteria: PlanCriteria,
-  profile: Profile
-): RankedRecommendation[] {
-  return restaurants
-    .map((r) => scoreRestaurant(r, criteria, profile))
-    .sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      return a.restaurant.name.localeCompare(b.restaurant.name);
-    });
-}
-
 type Props = {
   profile: Profile;
-  restaurants: Restaurant[];
 };
 
-export function PlanClient({ profile, restaurants }: Props) {
+export function PlanClient({ profile }: Props) {
   const defaultCriteria: PlanCriteria = useMemo(
     () => ({
       dateStart: "",
@@ -413,6 +323,10 @@ export function PlanClient({ profile, restaurants }: Props) {
   );
   const [debugInfo, setDebugInfo] = useState<string>("No request sent yet.");
   const [recommendationOffset, setRecommendationOffset] = useState(0);
+  const [recommendations, setRecommendations] = useState<UiRecommendation[]>([]);
+  const [confidence, setConfidence] = useState(0);
+  const [sourceMode, setSourceMode] = useState<"db" | "hybrid">("db");
+  const [recDebug, setRecDebug] = useState("No recommendation call yet.");
 
   const updateCriteria = (patch: Partial<PlanCriteria>) => {
     setCriteria((c) => {
@@ -425,6 +339,26 @@ export function PlanClient({ profile, restaurants }: Props) {
       }
       return next;
     });
+  };
+
+  const fetchRecommendations = async (
+    nextCriteria: PlanCriteria,
+    mode: "default" | "regenerate" | "tighten" | "broaden" = "default",
+    offset: number = recommendationOffset
+  ) => {
+    const res = await fetch("/api/plan/recommend", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ criteria: nextCriteria, mode, offset }),
+    });
+    if (!res.ok) throw new Error("recommend endpoint failed");
+    const data = (await res.json()) as RecommendResponse;
+    setRecommendations(data.recommendations ?? []);
+    setConfidence(data.confidence ?? 0);
+    setSourceMode(data.sourceMode ?? "db");
+    setRecDebug(
+      `mode=${data.debug.mode} · base=${data.debug.baseCandidateCount} · filtered=${data.debug.filteredCandidateCount} · working=${data.debug.workingCandidateCount} · webAdded=${data.debug.webAdded} · llmRerank=${String(data.debug.llmRerankUsed)}`
+    );
   };
 
   const sendMessage = async () => {
@@ -516,13 +450,27 @@ export function PlanClient({ profile, restaurants }: Props) {
 
       const nextPrompt = getNextPrompt(nextCriteria);
       const wantsRecommendations = isRecommendationRequest(text);
+      const shouldRecommend = wantsRecommendations || isCriteriaComplete(nextCriteria);
+      let nextOffset = recommendationOffset;
       if (wantsDifferentRecommendations(text)) {
-        setRecommendationOffset((prev) => prev + 5);
+        nextOffset = recommendationOffset + 3;
+        setRecommendationOffset(nextOffset);
+      }
+      if (shouldRecommend) {
+        try {
+          await fetchRecommendations(
+            nextCriteria,
+            wantsDifferentRecommendations(text) ? "regenerate" : "default",
+            nextOffset
+          );
+        } catch {
+          setRecDebug("Recommendation endpoint failed.");
+        }
       }
       const botText = nextPrompt
         ? nextPrompt
-        : wantsRecommendations || isCriteriaComplete(nextCriteria)
-          ? "Perfect. I have enough context and refreshed your top recommendations below."
+        : shouldRecommend
+          ? "Perfect. Here are your top 3 high-confidence picks below."
           : data.assistantMessage?.trim() ||
             "Got it. I updated your criteria and recommendations.";
       setMessages((m) => [...m, { role: "bot", text: botText }]);
@@ -543,8 +491,22 @@ export function PlanClient({ profile, restaurants }: Props) {
       setDebugInfo("Fallback parser used (AI endpoint unavailable or errored).");
       const nextPrompt = getNextPrompt(nextCriteria);
       const wantsRecommendations = isRecommendationRequest(text);
+      const shouldRecommend = wantsRecommendations || isCriteriaComplete(nextCriteria);
+      let nextOffset = recommendationOffset;
       if (wantsDifferentRecommendations(text)) {
-        setRecommendationOffset((prev) => prev + 5);
+        nextOffset = recommendationOffset + 3;
+        setRecommendationOffset(nextOffset);
+      }
+      if (shouldRecommend) {
+        try {
+          await fetchRecommendations(
+            nextCriteria,
+            wantsDifferentRecommendations(text) ? "regenerate" : "default",
+            nextOffset
+          );
+        } catch {
+          setRecDebug("Recommendation endpoint failed.");
+        }
       }
       setMessages((m) => [
         ...m,
@@ -552,8 +514,8 @@ export function PlanClient({ profile, restaurants }: Props) {
           role: "bot",
           text: nextPrompt
             ? nextPrompt
-            : wantsRecommendations || isCriteriaComplete(nextCriteria)
-              ? "Got it. I have enough context and refreshed your top recommendations below."
+            : shouldRecommend
+              ? "Got it. I refreshed your top 3 picks below."
               : "Got it. I updated your criteria and refreshed recommendations.",
         },
       ]);
@@ -562,22 +524,6 @@ export function PlanClient({ profile, restaurants }: Props) {
     }
   };
 
-  const filteredRestaurants = useMemo(
-    () => applyHardFilters(restaurants, criteria),
-    [restaurants, criteria]
-  );
-  const ranked = useMemo(
-    () => rankRestaurants(filteredRestaurants, criteria, profile),
-    [filteredRestaurants, criteria, profile]
-  );
-
-  const topRecommendations = useMemo(() => {
-    if (ranked.length <= 5) return ranked;
-    const normalizedOffset = recommendationOffset % ranked.length;
-    const first = ranked.slice(normalizedOffset, normalizedOffset + 5);
-    if (first.length === 5) return first;
-    return [...first, ...ranked.slice(0, 5 - first.length)];
-  }, [ranked, recommendationOffset]);
   const hasAnyCriteria =
     criteria.dateStart ||
     criteria.dateEnd ||
@@ -585,6 +531,16 @@ export function PlanClient({ profile, restaurants }: Props) {
     criteria.vibeTags.length > 0 ||
     criteria.minPrice != null ||
     criteria.maxPrice != null;
+
+  const runAction = async (mode: "regenerate" | "tighten" | "broaden") => {
+    try {
+      const offset = mode === "regenerate" ? recommendationOffset + 3 : recommendationOffset;
+      if (mode === "regenerate") setRecommendationOffset(offset);
+      await fetchRecommendations(criteria, mode, offset);
+    } catch {
+      setRecDebug("Recommendation endpoint failed.");
+    }
+  };
 
   return (
     <div className="space-y-8">
@@ -733,48 +689,54 @@ export function PlanClient({ profile, restaurants }: Props) {
       </section>
 
       <section>
-        <h2 className="text-lg font-medium text-slate-900">
-          {hasAnyCriteria ? "Top recommendations" : "Your restaurants"}
-        </h2>
-        <p className="mt-1 text-sm text-slate-600">
-          {criteria.vibeTags.length > 0
-            ? `Ranked by: ${criteria.vibeTags.join(", ")} + neighborhood + price + booking link.`
-            : "Ranked by your profile defaults (neighborhood + price + booking link)."}
-        </p>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-lg font-medium text-slate-900">
+            {hasAnyCriteria ? "Top 3 high-confidence picks" : "Recommendations"}
+          </h2>
+          <div className="text-xs text-slate-500">
+            Confidence: {Math.round(confidence * 100)}% · Source: {sourceMode === "hybrid" ? "DB + Live web" : "DB"}
+          </div>
+        </div>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <button className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50" onClick={() => void runAction("regenerate")}>Regenerate Top 3</button>
+          <button className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50" onClick={() => void runAction("tighten")}>Tighten constraints</button>
+          <button className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50" onClick={() => void runAction("broaden")}>Broaden search</button>
+        </div>
+        <p className="mt-2 text-xs text-slate-500">Recommend debug: {recDebug}</p>
 
-        {restaurants.length === 0 ? (
+        {recommendations.length === 0 ? (
           <div className="mt-4 card border-dashed border-slate-300 bg-slate-50/50">
-            <p className="text-slate-600">
-              No restaurants yet. <Link href="/onboarding" className="font-medium text-teal-700 hover:underline">Add some in onboarding</Link>.
-            </p>
+            <p className="text-slate-600">No recommendations yet. Ask the chat what you are in the mood for.</p>
           </div>
         ) : (
           <ul className="mt-4 space-y-3">
-            {topRecommendations.map(({ restaurant, reasons }, idx) => (
-              <li key={restaurant.id} className="card">
+            {recommendations.map((r, idx) => (
+              <li key={r.id} className="card">
                 <div className="flex items-start justify-between gap-2">
-                  <div className="font-medium text-slate-900">{idx + 1}. {restaurant.name}</div>
-                  {restaurant.price_level != null && (
-                    <div className="text-xs text-slate-500">{"$".repeat(restaurant.price_level)}</div>
-                  )}
+                  <div className="font-medium text-slate-900">{idx + 1}. {r.name}</div>
+                  <div className="flex items-center gap-2">
+                    {r.priceLevel != null && (
+                      <div className="text-xs text-slate-500">{"$".repeat(r.priceLevel)}</div>
+                    )}
+                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">{r.source}</span>
+                  </div>
                 </div>
 
-                {restaurant.neighborhood && (
-                  <div className="text-sm text-slate-500">{restaurant.neighborhood}</div>
+                {r.neighborhood && (
+                  <div className="text-sm text-slate-500">{r.neighborhood}</div>
                 )}
 
-                {reasons.length > 0 && (
-                  <p className="mt-2 text-sm text-slate-600">Why this fits: {reasons.join("; ")}.</p>
-                )}
+                <p className="mt-2 text-sm text-slate-700"><span className="font-medium">Why this fits:</span> {r.reason}</p>
+                <p className="mt-1 text-sm text-slate-500"><span className="font-medium">Tradeoff:</span> {r.tradeoff}</p>
 
-                {restaurant.booking_url ? (
+                {r.bookingUrl ? (
                   <a
-                    href={restaurant.booking_url}
+                    href={r.bookingUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="btn-primary mt-3 inline-block"
                   >
-                    Book this table &rarr;
+                    Open booking link &rarr;
                   </a>
                 ) : (
                   <p className="mt-2 text-sm text-slate-500">No booking link yet.</p>

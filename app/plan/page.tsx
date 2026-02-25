@@ -1,14 +1,12 @@
-import { fetchProfile, fetchRestaurantsForProfile } from "@/lib/supabase-server";
+import { fetchProfile } from "@/lib/supabase-server";
 import { PlanClient } from "./plan-client";
 
 export default async function PlanPage() {
   let profile = null;
-  let restaurants: Awaited<ReturnType<typeof fetchRestaurantsForProfile>> = [];
   let configError: string | null = null;
 
   try {
     profile = await fetchProfile();
-    restaurants = await fetchRestaurantsForProfile();
   } catch (e) {
     configError = e instanceof Error ? e.message : "Configuration error";
   }
@@ -27,7 +25,7 @@ export default async function PlanPage() {
       )}
 
       {!configError && profile && (
-        <PlanClient profile={profile} restaurants={restaurants} />
+        <PlanClient profile={profile} />
       )}
 
       {!configError && !profile && (

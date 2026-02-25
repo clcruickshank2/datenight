@@ -24,6 +24,18 @@ export const maxDuration = 60;
 
 const MAX_ITEMS_PER_FEED = 30;
 const ARTICLE_FETCH_TIMEOUT_MS = 10_000;
+const TRENDING_MIN_VALID_COUNT = 6;
+const TRENDING_MIN_EVIDENCE_RATIO = 0.7;
+
+type TrendingRestaurantRow = {
+  name: string;
+  overview?: string;
+  source_article_ids: string[];
+  neighborhood?: string | null;
+  price_level?: number | null;
+  cuisine_vibes?: string[];
+  google_rating?: number | null;
+};
 
 function stripHtmlToText(html: string): string {
   return html
@@ -57,6 +69,111 @@ async function fetchArticleExcerpt(url: string): Promise<string> {
   } catch {
     return "";
   }
+}
+
+function normalizeText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function looksLikeNoise(name: string): boolean {
+  const n = normalizeText(name);
+  const blocked = [
+    "subscribe",
+    "newsletter",
+    "newsletters",
+    "sign up",
+    "readers",
+    "privacy",
+    "policy",
+    "terms",
+    "account",
+    "log in",
+    "login",
+    "register",
+    "everywhere",
+    "everything",
+  ];
+  return blocked.some((term) => n.includes(term));
+}
+
+function hasArticleEvidence(name: string, articleText: string): boolean {
+  const needle = normalizeText(name);
+  if (!needle) return false;
+  const hay = normalizeText(articleText);
+  if (!hay) return false;
+  return hay.includes(needle);
+}
+
+function isSeedEligible(row: TrendingRestaurantRow): boolean {
+  return Boolean(
+    row.neighborhood ||
+      (typeof row.price_level === "number" && row.price_level >= 1 && row.price_level <= 4) ||
+      (Array.isArray(row.cuisine_vibes) && row.cuisine_vibes.length > 0) ||
+      (typeof row.google_rating === "number" && row.google_rating >= 0 && row.google_rating <= 5)
+  );
+}
+
+function evaluateTrendingQuality(
+  restaurants: TrendingRestaurantRow[],
+  articleTextById: Map<string, string>
+): {
+  passed: boolean;
+  accepted: TrendingRestaurantRow[];
+  validCount: number;
+  evidenceCount: number;
+  evidenceRatio: number;
+  noiseFiltered: number;
+  reason?: string;
+} {
+  const cleaned = restaurants.filter((r) => !looksLikeNoise(r.name));
+  const accepted = cleaned.filter((r) => {
+    const textFromLinkedIds = r.source_article_ids
+      .map((id) => articleTextById.get(id) ?? "")
+      .join(" ");
+    return hasArticleEvidence(r.name, textFromLinkedIds);
+  });
+
+  const validCount = cleaned.length;
+  const evidenceCount = accepted.length;
+  const evidenceRatio = validCount > 0 ? evidenceCount / validCount : 0;
+  const noiseFiltered = restaurants.length - cleaned.length;
+
+  if (validCount < TRENDING_MIN_VALID_COUNT) {
+    return {
+      passed: false,
+      accepted: [],
+      validCount,
+      evidenceCount,
+      evidenceRatio,
+      noiseFiltered,
+      reason: `quality_gate_failed: only ${validCount} plausible rows (min ${TRENDING_MIN_VALID_COUNT})`,
+    };
+  }
+
+  if (evidenceRatio < TRENDING_MIN_EVIDENCE_RATIO) {
+    return {
+      passed: false,
+      accepted: [],
+      validCount,
+      evidenceCount,
+      evidenceRatio,
+      noiseFiltered,
+      reason: `quality_gate_failed: evidence ratio ${evidenceRatio.toFixed(2)} below ${TRENDING_MIN_EVIDENCE_RATIO}`,
+    };
+  }
+
+  return {
+    passed: true,
+    accepted,
+    validCount,
+    evidenceCount,
+    evidenceRatio,
+    noiseFiltered,
+  };
 }
 
 export async function GET(request: NextRequest) {
@@ -212,28 +329,79 @@ export async function GET(request: NextRequest) {
           ...a,
           summary: `${a.summary ?? ""} ${excerptById.get(a.id) ?? ""}`.trim().slice(0, 4000),
         }));
+        const articleTextById = new Map(
+          enriched.map((a) => [a.id, `${a.title} ${a.summary ?? ""}`])
+        );
 
         const extracted = await extractTrendingRestaurants(enriched, sourceNames);
         trendingExtracted = extracted.extracted_count ?? extracted.restaurants.length;
         trendingEnriched = extracted.enriched_count ?? 0;
         if (extracted.restaurants.length > 0) {
+          const quality = evaluateTrendingQuality(
+            extracted.restaurants as TrendingRestaurantRow[],
+            articleTextById
+          );
+          if (!quality.passed) {
+            trendingMethod = extracted.method ?? "none";
+            trendingError = [
+              extracted.error,
+              quality.reason,
+              `quality_stats(valid=${quality.validCount}, evidence=${quality.evidenceCount}, evidence_ratio=${quality.evidenceRatio.toFixed(2)}, noise_filtered=${quality.noiseFiltered})`,
+            ]
+              .filter(Boolean)
+              .join("; ");
+            // Safeguard: keep last known-good trending rows. Do not overwrite or seed.
+            return Response.json({
+              ok: true,
+              sources: results.length,
+              results,
+              curated,
+              curation: {
+                method: curationMethod,
+                error: curationError ?? null,
+                hasOpenAiKey: Boolean(process.env.OPENAI_API_KEY),
+              },
+              trending: {
+                extracted: trendingExtracted,
+                enriched: trendingEnriched,
+                inserted: trendingInserted,
+                seeded_to_restaurants: trendingSeeded,
+                method: trendingMethod,
+                error: trendingError ?? null,
+              },
+            });
+          }
+
+          const acceptedRows = quality.accepted;
           const clearErr = await clearBuzzRestaurants();
           if (clearErr.error) {
             trendingError = clearErr.error;
           } else {
-            const insertErr = await insertBuzzRestaurants(extracted.restaurants);
+            const insertErr = await insertBuzzRestaurants(acceptedRows);
             if (insertErr.error) {
               trendingError = insertErr.error;
             } else {
-              trendingInserted = extracted.restaurants.length;
+              trendingInserted = acceptedRows.length;
               trendingMethod = extracted.method ?? "llm";
-              const seed = await upsertTrendingIntoRestaurants(extracted.restaurants);
-              if (seed.error) {
-                trendingError = trendingError
-                  ? `${trendingError}; ${seed.error}`
-                  : seed.error;
+              const seedableRows = acceptedRows.filter((row) =>
+                isSeedEligible(row as TrendingRestaurantRow)
+              );
+              if (seedableRows.length > 0) {
+                const seed = await upsertTrendingIntoRestaurants(seedableRows);
+                if (seed.error) {
+                  trendingError = trendingError
+                    ? `${trendingError}; ${seed.error}`
+                    : seed.error;
+                } else {
+                  trendingSeeded = seed.upserted;
+                }
               } else {
-                trendingSeeded = seed.upserted;
+                trendingError = [
+                  trendingError,
+                  "No enriched trending rows met seed eligibility; skipped seeding",
+                ]
+                  .filter(Boolean)
+                  .join("; ");
               }
               if (extracted.error) {
                 trendingError = trendingError

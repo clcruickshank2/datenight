@@ -426,6 +426,44 @@ If unsure, exclude the item.`;
       };
     }
 
+    // Last LLM rescue pass: ask only for clean restaurant names.
+    const namesOnlyPrompt = `Extract only explicit Denver restaurant names from these article snippets.
+
+${baseContext}
+
+Rules:
+- Return only real restaurant names.
+- Exclude generic phrases, newsletter text, nav links, category names.
+- If an item is not clearly a restaurant, exclude it.
+
+Return ONLY JSON object:
+{
+  "restaurants": [
+    { "name": "Restaurant Name", "article_refs": ["A1"] }
+  ]
+}`;
+    const namesOnly = await runRestaurantExtractionAttempt(
+      namesOnlyPrompt,
+      key,
+      articles,
+      refToId
+    );
+    const namesOnlyRows = dedupeRestaurantsByName(namesOnly.restaurants)
+      .filter((r) => isPlausibleRestaurantName(r.name))
+      .slice(0, 15);
+    if (namesOnlyRows.length > 0) {
+      const enriched = await enrichTrendingRestaurants(namesOnlyRows);
+      return {
+        restaurants: enriched.restaurants,
+        method: "llm",
+        extracted_count: namesOnlyRows.length,
+        enriched_count: enriched.enrichedCount,
+        error: [extractionError, namesOnly.error, enriched.error]
+          .filter(Boolean)
+          .join("; ") || undefined,
+      };
+    }
+
     const fallbackBase = heuristicTrendingRestaurants(articles);
     const fallback = fallbackBase.map((r) => ({
       name: r.name,
@@ -537,7 +575,7 @@ async function runRestaurantExtractionAttempt(
             source_article_ids: inferredIds.length > 0 ? inferredIds : [articles[0].id],
           };
         })
-        .filter((r) => r.name.length > 0)
+        .filter((r) => r.name.length > 0 && isPlausibleRestaurantName(r.name))
     ).slice(0, 15);
 
     if (restaurants.length === 0) {
@@ -650,7 +688,8 @@ function heuristicTrendingRestaurants(
       cuisine_vibes: [],
       google_rating: null,
       rating_source: null,
-    }));
+    }))
+    .filter((r) => isPlausibleRestaurantName(r.name));
 }
 
 function normalizeRestaurantName(name: string): string {
@@ -865,4 +904,48 @@ function sanitizeCuisineVibes(value: unknown): string[] {
     if (out.length >= 6) break;
   }
   return out;
+}
+
+function isPlausibleRestaurantName(name: string): boolean {
+  const trimmed = name.trim();
+  if (!trimmed) return false;
+  if (trimmed.length < 3 || trimmed.length > 48) return false;
+  const words = trimmed.split(/\s+/);
+  if (words.length > 5) return false;
+
+  const lower = trimmed.toLowerCase();
+  const blockedTerms = [
+    "subscribe",
+    "newsletter",
+    "newsletters",
+    "sign up",
+    "sign-up",
+    "readers",
+    "privacy",
+    "cookie",
+    "cookies",
+    "policy",
+    "policies",
+    "terms",
+    "account",
+    "login",
+    "log in",
+    "register",
+    "everything",
+    "everywhere",
+    "denver the",
+  ];
+  for (const term of blockedTerms) {
+    if (lower.includes(term)) return false;
+  }
+
+  // Reject obvious UI/navigation copy that still slips through.
+  if (/^(for|the|your|our)\b/i.test(trimmed) && words.length >= 3) return false;
+  if (/(readers?|newsletter|subscribe|sign|account|policy|terms)$/i.test(trimmed)) return false;
+
+  // Require at least one letter and avoid all-caps nav fragments.
+  if (!/[a-z]/i.test(trimmed)) return false;
+  if (trimmed === trimmed.toUpperCase() && words.length >= 2) return false;
+
+  return true;
 }
