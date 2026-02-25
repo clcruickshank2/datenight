@@ -69,6 +69,38 @@ function parseJsonArrayFromModel(content: string): unknown[] {
   throw new Error("Model did not return a valid JSON array");
 }
 
+function parseJsonObjectFromModel(content: string): Record<string, unknown> {
+  const trimmed = content.trim();
+  try {
+    const direct = JSON.parse(trimmed);
+    if (direct && typeof direct === "object" && !Array.isArray(direct)) {
+      return direct as Record<string, unknown>;
+    }
+  } catch {
+    // continue
+  }
+
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenceMatch?.[1]) {
+    const parsed = JSON.parse(fenceMatch[1].trim());
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  }
+
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    const sliced = trimmed.slice(start, end + 1);
+    const parsed = JSON.parse(sliced);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  }
+
+  throw new Error("Model did not return a valid JSON object");
+}
+
 /**
  * Returns 5 article IDs in recommendation order (best first), or [] if no key or error.
  * Uses IDs so we never miss due to URL mismatch; prompt favors editorial sources.
@@ -314,78 +346,75 @@ export async function extractTrendingRestaurants(
   if (!key) return { restaurants: [], error: "OPENAI_API_KEY missing" };
   if (articles.length === 0) return { restaurants: [], error: "No curated articles provided" };
 
-  const list = articles.map((a) => ({
+  const list = articles.map((a, idx) => ({
+    ref: `A${idx + 1}`,
     id: a.id,
     source: sourceNames.get(a.source_id) ?? a.source_id,
     title: a.title,
-    summary: (a.summary ?? "").slice(0, 400),
+    summary: (a.summary ?? "").slice(0, 1600),
     url: a.url,
   }));
+  const refToId = new Map(list.map((a) => [a.ref, a.id]));
 
-  const prompt = `You are extracting trending restaurants from curated Denver food articles.
-
-Input articles (id, source, title, summary, url):
-${list.map((a) => `- id=${a.id} | source=${a.source} | title="${a.title}" | summary="${a.summary}" | url=${a.url}`).join("\n")}
-
-Task:
-- Identify up to 15 restaurants that are explicitly mentioned by name in the article content.
-- Do not infer or guess unnamed venues.
-- Prefer restaurants that appear in multiple articles or are clearly highlighted.
-- For each restaurant, return:
-  - name
-  - overview (max 2 concise sentences)
-  - source_article_ids (array of article IDs from the input where it appears)
-
-Output format:
-Return ONLY valid JSON array of objects:
-[
-  { "name": "...", "overview": "...", "source_article_ids": ["id1","id2"] }
-]`;
+  const baseContext = `Input articles (ref, source, title, summary, url):
+${list.map((a) => `- ref=${a.ref} | source=${a.source} | title="${a.title}" | summary="${a.summary}" | url=${a.url}`).join("\n")}`;
 
   try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${key}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.2,
-      }),
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      return { restaurants: [], error: `OpenAI ${res.status}: ${text}` };
+    const strictPrompt = `You are extracting Denver restaurant names from curated articles.
+
+${baseContext}
+
+Rules:
+- Include only restaurants explicitly named in the article content.
+- Do not invent names and do not include neighborhoods or generic phrases.
+- Use article refs (A1..A5), never UUIDs.
+- Return up to 15 rows.
+
+Return ONLY a JSON object:
+{
+  "restaurants": [
+    {
+      "name": "Restaurant Name",
+      "overview": "One or two concise sentences about why it is trending.",
+      "article_refs": ["A1", "A3"]
     }
-    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-    const content = data.choices?.[0]?.message?.content?.trim();
-    if (!content) return { restaurants: [], error: "OpenAI response missing content" };
+  ]
+}`;
 
-    const parsed = parseJsonArrayFromModel(content) as {
-      name?: string;
-      overview?: string;
-      source_article_ids?: string[];
-    }[];
-
-    const validArticleIds = new Set(articles.map((a) => a.id));
-    const extracted = dedupeRestaurantsByName(
-      parsed
-      .map((r) => ({
-        name: (r.name ?? "").trim(),
-        overview: (r.overview ?? "").trim(),
-        source_article_ids: (r.source_article_ids ?? []).filter((id) => validArticleIds.has(id)),
-      }))
-      .filter((r) => r.name.length > 0)
-      .map((r) => ({
-        name: r.name,
-        overview: r.overview || "Trending restaurant in Denver food coverage.",
-        source_article_ids: r.source_article_ids.length ? r.source_article_ids : [articles[0].id],
-      }))
+    const strictAttempt = await runRestaurantExtractionAttempt(
+      strictPrompt,
+      key,
+      articles,
+      refToId
     );
 
-    const trimmed = extracted.slice(0, 15);
+    let extracted = strictAttempt.restaurants;
+    let extractionError = strictAttempt.error;
+
+    if (extracted.length === 0) {
+      const retryPrompt = `Extract explicitly named restaurants from these Denver food articles.
+
+${baseContext}
+
+Return ONLY JSON:
+{
+  "restaurants": [
+    { "name": "Restaurant Name", "article_refs": ["A1"] }
+  ]
+}
+
+If unsure, exclude the item.`;
+      const retryAttempt = await runRestaurantExtractionAttempt(
+        retryPrompt,
+        key,
+        articles,
+        refToId
+      );
+      extracted = retryAttempt.restaurants;
+      extractionError = [extractionError, retryAttempt.error].filter(Boolean).join("; ");
+    }
+
+    const trimmed = dedupeRestaurantsByName(extracted).slice(0, 15);
     if (trimmed.length > 0) {
       const enriched = await enrichTrendingRestaurants(trimmed);
       return {
@@ -393,17 +422,29 @@ Return ONLY valid JSON array of objects:
         method: "llm",
         extracted_count: trimmed.length,
         enriched_count: enriched.enrichedCount,
-        error: enriched.error,
+        error: [extractionError, enriched.error].filter(Boolean).join("; ") || undefined,
       };
     }
-    const fallback = heuristicTrendingRestaurants(articles);
+
+    const fallbackBase = heuristicTrendingRestaurants(articles);
+    const fallback = fallbackBase.map((r) => ({
+      name: r.name,
+      overview: r.overview,
+      source_article_ids: r.source_article_ids,
+    }));
     if (fallback.length > 0) {
+      const enrichedFallback = await enrichTrendingRestaurants(fallback);
       return {
-        restaurants: fallback,
+        restaurants: enrichedFallback.restaurants,
         method: "heuristic",
         extracted_count: fallback.length,
-        enriched_count: 0,
-        error: "LLM returned empty extraction; used heuristic fallback",
+        enriched_count: enrichedFallback.enrichedCount,
+        error: [
+          extractionError || "LLM returned empty extraction; used heuristic fallback",
+          enrichedFallback.error,
+        ]
+          .filter(Boolean)
+          .join("; "),
       };
     }
     return {
@@ -411,18 +452,27 @@ Return ONLY valid JSON array of objects:
       method: "llm",
       extracted_count: 0,
       enriched_count: 0,
-      error: "LLM returned empty extraction",
+      error: extractionError || "LLM returned empty extraction",
     };
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown extraction error";
     const fallback = heuristicTrendingRestaurants(articles);
     if (fallback.length > 0) {
+      const enrichedFallback = await enrichTrendingRestaurants(
+        fallback.map((r) => ({
+          name: r.name,
+          overview: r.overview,
+          source_article_ids: r.source_article_ids,
+        }))
+      );
       return {
-        restaurants: fallback,
+        restaurants: enrichedFallback.restaurants,
         method: "heuristic",
         extracted_count: fallback.length,
-        enriched_count: 0,
-        error: `${message}; used heuristic fallback`,
+        enriched_count: enrichedFallback.enrichedCount,
+        error: [message, "used heuristic fallback", enrichedFallback.error]
+          .filter(Boolean)
+          .join("; "),
       };
     }
     return {
@@ -433,6 +483,108 @@ Return ONLY valid JSON array of objects:
       error: message,
     };
   }
+}
+
+async function runRestaurantExtractionAttempt(
+  prompt: string,
+  key: string,
+  articles: ArticleForCuration[],
+  refToId: Map<string, string>
+): Promise<{ restaurants: ExtractedTrendingRestaurant[]; error?: string }> {
+  try {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.1,
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      return { restaurants: [], error: `OpenAI ${res.status}: ${text}` };
+    }
+    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    const content = data.choices?.[0]?.message?.content?.trim();
+    if (!content) return { restaurants: [], error: "OpenAI response missing content" };
+
+    const parsedRows = extractRestaurantsFromModelContent(content);
+    if (parsedRows.length === 0) {
+      return { restaurants: [], error: "LLM returned zero restaurant rows" };
+    }
+
+    const restaurants = dedupeRestaurantsByName(
+      parsedRows
+        .map((r) => {
+          const name = (r.name ?? "").trim();
+          const overview = (r.overview ?? "").trim();
+          const refs = Array.isArray(r.article_refs)
+            ? r.article_refs
+                .map((ref) => (typeof ref === "string" ? ref.trim().toUpperCase() : ""))
+                .filter((ref) => ref.length > 0)
+            : [];
+          const fromRefs = refs
+            .map((ref) => refToId.get(ref))
+            .filter((id): id is string => Boolean(id));
+          const inferredIds = fromRefs.length > 0 ? fromRefs : inferArticleIdsByName(name, articles);
+          return {
+            name,
+            overview: overview || "Trending restaurant in Denver food coverage.",
+            source_article_ids: inferredIds.length > 0 ? inferredIds : [articles[0].id],
+          };
+        })
+        .filter((r) => r.name.length > 0)
+    ).slice(0, 15);
+
+    if (restaurants.length === 0) {
+      return { restaurants: [], error: "LLM output rows were not valid restaurants" };
+    }
+    return { restaurants };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : "Unknown extraction error";
+    return { restaurants: [], error: message };
+  }
+}
+
+function extractRestaurantsFromModelContent(content: string): {
+  name?: string;
+  overview?: string;
+  article_refs?: unknown[];
+}[] {
+  try {
+    const object = parseJsonObjectFromModel(content);
+    const fromObject = object.restaurants;
+    if (Array.isArray(fromObject)) {
+      return fromObject as {
+        name?: string;
+        overview?: string;
+        article_refs?: unknown[];
+      }[];
+    }
+  } catch {
+    // continue with array fallback
+  }
+
+  const array = parseJsonArrayFromModel(content);
+  return array as {
+    name?: string;
+    overview?: string;
+    article_refs?: unknown[];
+  }[];
+}
+
+function inferArticleIdsByName(name: string, articles: ArticleForCuration[]): string[] {
+  if (!name) return [];
+  const needle = normalizeRestaurantName(name);
+  if (!needle) return [];
+  const ids = articles
+    .filter((a) => normalizeRestaurantName(`${a.title} ${a.summary ?? ""}`).includes(needle))
+    .map((a) => a.id);
+  return ids.slice(0, 3);
 }
 
 function heuristicTrendingRestaurants(
