@@ -123,8 +123,8 @@ export async function GET(request: NextRequest) {
           candidateIds: fallbackIds,
           articles: recent,
           target: 5,
-          maxPerSource: 2,
-          minSources: 3,
+          maxPerSource: 1,
+          minSources: 4,
         });
         if (ids.length >= 5) {
           await clearBuzzCuratedRanks();
