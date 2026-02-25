@@ -8,6 +8,12 @@ import {
 const CURATED_LIMIT = 5;
 const TRENDING_LIMIT = 15;
 
+function formatPriceLevel(priceLevel: number | null): string {
+  if (priceLevel == null) return "—";
+  const n = Math.max(1, Math.min(4, Math.round(priceLevel)));
+  return "$".repeat(n);
+}
+
 export default async function BuzzPage() {
   let articles: Awaited<ReturnType<typeof fetchBuzzArticles>> = [];
   let sources: Awaited<ReturnType<typeof fetchBuzzSources>> = [];
@@ -106,20 +112,23 @@ export default async function BuzzPage() {
       <section className="mt-10">
         <h2 className="text-lg font-medium text-slate-900">Trending restaurants</h2>
         <p className="mt-1 text-sm text-slate-500">
-          Restaurants getting buzz in Denver food coverage. We’ll extract these from articles soon.
+          Restaurants getting buzz in Denver food coverage, enriched with neighborhood, vibe, price, and rating.
         </p>
         {restaurants.length === 0 ? (
           <div className="mt-4 card border-dashed border-slate-300 bg-slate-50/50">
-            <p className="text-slate-600">No trending restaurants yet. Once we add LLM extraction from articles, they’ll appear here.</p>
+            <p className="text-slate-600">No trending restaurants yet. Run the Buzz cron to extract and enrich them from curated coverage.</p>
           </div>
         ) : (
           <div className="mt-4 overflow-x-auto">
-            <table className="w-full min-w-[480px] border-collapse text-sm">
+            <table className="w-full min-w-[760px] border-collapse text-sm">
               <thead>
                 <tr className="border-b border-slate-200 text-left text-slate-500">
                   <th className="py-2 pr-2 font-medium">Restaurant</th>
+                  <th className="py-2 pr-2 font-medium">Neighborhood</th>
+                  <th className="py-2 pr-2 font-medium">Price</th>
+                  <th className="py-2 pr-2 font-medium">Cuisine/Vibes</th>
                   <th className="py-2 pr-2 font-medium">Overview</th>
-                  <th className="py-2 w-16 font-medium text-right">Rating</th>
+                  <th className="py-2 w-20 font-medium text-right">Rating</th>
                 </tr>
               </thead>
               <tbody>
@@ -150,12 +159,17 @@ export default async function BuzzPage() {
                         </span>
                       </div>
                     </td>
-                    <td className="max-w-[280px] py-3 pr-2 text-slate-600 line-clamp-2">
+                    <td className="py-3 pr-2 text-slate-600">{r.neighborhood ?? "—"}</td>
+                    <td className="py-3 pr-2 text-slate-700">{formatPriceLevel(r.price_level)}</td>
+                    <td className="max-w-[220px] py-3 pr-2 text-slate-600 line-clamp-2">
+                      {r.cuisine_vibes.length > 0 ? r.cuisine_vibes.join(", ") : "—"}
+                    </td>
+                    <td className="max-w-[260px] py-3 pr-2 text-slate-600 line-clamp-2">
                       {r.overview ?? "—"}
                     </td>
                     <td className="py-3 text-right">
                       {r.google_rating != null ? (
-                        <span className="text-slate-700">{r.google_rating}</span>
+                        <span className="text-slate-700">{r.google_rating.toFixed(1)}/5</span>
                       ) : (
                         <span className="text-slate-400">—</span>
                       )}

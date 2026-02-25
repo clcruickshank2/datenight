@@ -9,6 +9,7 @@ import {
   setBuzzCuratedRanksById,
   clearBuzzRestaurants,
   insertBuzzRestaurants,
+  upsertTrendingIntoRestaurants,
 } from "@/lib/buzz-server";
 import {
   fallbackCuratedArticleIds,
@@ -188,8 +189,11 @@ export async function GET(request: NextRequest) {
 
   // Trending restaurant extraction (from curated articles)
   let trendingInserted = 0;
+  let trendingSeeded = 0;
   let trendingMethod: "llm" | "heuristic" | "none" = "none";
   let trendingError: string | undefined;
+  let trendingExtracted = 0;
+  let trendingEnriched = 0;
   if (process.env.OPENAI_API_KEY) {
     try {
       const curatedArticles = await fetchCuratedBuzzArticles(5);
@@ -210,6 +214,8 @@ export async function GET(request: NextRequest) {
         }));
 
         const extracted = await extractTrendingRestaurants(enriched, sourceNames);
+        trendingExtracted = extracted.extracted_count ?? extracted.restaurants.length;
+        trendingEnriched = extracted.enriched_count ?? 0;
         if (extracted.restaurants.length > 0) {
           const clearErr = await clearBuzzRestaurants();
           if (clearErr.error) {
@@ -221,7 +227,19 @@ export async function GET(request: NextRequest) {
             } else {
               trendingInserted = extracted.restaurants.length;
               trendingMethod = extracted.method ?? "llm";
-              if (extracted.error) trendingError = extracted.error;
+              const seed = await upsertTrendingIntoRestaurants(extracted.restaurants);
+              if (seed.error) {
+                trendingError = trendingError
+                  ? `${trendingError}; ${seed.error}`
+                  : seed.error;
+              } else {
+                trendingSeeded = seed.upserted;
+              }
+              if (extracted.error) {
+                trendingError = trendingError
+                  ? `${trendingError}; ${extracted.error}`
+                  : extracted.error;
+              }
             }
           }
         } else {
@@ -248,7 +266,10 @@ export async function GET(request: NextRequest) {
       hasOpenAiKey: Boolean(process.env.OPENAI_API_KEY),
     },
     trending: {
+      extracted: trendingExtracted,
+      enriched: trendingEnriched,
       inserted: trendingInserted,
+      seeded_to_restaurants: trendingSeeded,
       method: trendingMethod,
       error: trendingError ?? null,
     },

@@ -27,8 +27,15 @@ export type TrendingExtractionResult = {
     name: string;
     overview: string;
     source_article_ids: string[];
+    neighborhood?: string | null;
+    price_level?: number | null;
+    cuisine_vibes?: string[];
+    google_rating?: number | null;
+    rating_source?: string | null;
   }[];
   method?: "llm" | "heuristic";
+  extracted_count?: number;
+  enriched_count?: number;
   error?: string;
 };
 
@@ -321,7 +328,8 @@ Input articles (id, source, title, summary, url):
 ${list.map((a) => `- id=${a.id} | source=${a.source} | title="${a.title}" | summary="${a.summary}" | url=${a.url}`).join("\n")}
 
 Task:
-- Identify up to 15 restaurants that are explicitly mentioned or strongly implied.
+- Identify up to 15 restaurants that are explicitly mentioned by name in the article content.
+- Do not infer or guess unnamed venues.
 - Prefer restaurants that appear in multiple articles or are clearly highlighted.
 - For each restaurant, return:
   - name
@@ -362,7 +370,8 @@ Return ONLY valid JSON array of objects:
     }[];
 
     const validArticleIds = new Set(articles.map((a) => a.id));
-    const out = parsed
+    const extracted = dedupeRestaurantsByName(
+      parsed
       .map((r) => ({
         name: (r.name ?? "").trim(),
         overview: (r.overview ?? "").trim(),
@@ -373,21 +382,37 @@ Return ONLY valid JSON array of objects:
         name: r.name,
         overview: r.overview || "Trending restaurant in Denver food coverage.",
         source_article_ids: r.source_article_ids.length ? r.source_article_ids : [articles[0].id],
-      }));
+      }))
+    );
 
-    const trimmed = out.slice(0, 15);
+    const trimmed = extracted.slice(0, 15);
     if (trimmed.length > 0) {
-      return { restaurants: trimmed, method: "llm" };
+      const enriched = await enrichTrendingRestaurants(trimmed);
+      return {
+        restaurants: enriched.restaurants,
+        method: "llm",
+        extracted_count: trimmed.length,
+        enriched_count: enriched.enrichedCount,
+        error: enriched.error,
+      };
     }
     const fallback = heuristicTrendingRestaurants(articles);
     if (fallback.length > 0) {
       return {
         restaurants: fallback,
         method: "heuristic",
+        extracted_count: fallback.length,
+        enriched_count: 0,
         error: "LLM returned empty extraction; used heuristic fallback",
       };
     }
-    return { restaurants: [], method: "llm", error: "LLM returned empty extraction" };
+    return {
+      restaurants: [],
+      method: "llm",
+      extracted_count: 0,
+      enriched_count: 0,
+      error: "LLM returned empty extraction",
+    };
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown extraction error";
     const fallback = heuristicTrendingRestaurants(articles);
@@ -395,16 +420,33 @@ Return ONLY valid JSON array of objects:
       return {
         restaurants: fallback,
         method: "heuristic",
+        extracted_count: fallback.length,
+        enriched_count: 0,
         error: `${message}; used heuristic fallback`,
       };
     }
-    return { restaurants: [], method: "llm", error: message };
+    return {
+      restaurants: [],
+      method: "llm",
+      extracted_count: 0,
+      enriched_count: 0,
+      error: message,
+    };
   }
 }
 
 function heuristicTrendingRestaurants(
   articles: ArticleForCuration[]
-): { name: string; overview: string; source_article_ids: string[] }[] {
+): {
+  name: string;
+  overview: string;
+  source_article_ids: string[];
+  neighborhood?: string | null;
+  price_level?: number | null;
+  cuisine_vibes?: string[];
+  google_rating?: number | null;
+  rating_source?: string | null;
+}[] {
   const stop = new Set([
     "Denver",
     "Eater",
@@ -451,5 +493,224 @@ function heuristicTrendingRestaurants(
       name,
       overview: "Mentioned in this week's curated Denver food coverage.",
       source_article_ids: Array.from(rec.articleIds),
+      neighborhood: null,
+      price_level: null,
+      cuisine_vibes: [],
+      google_rating: null,
+      rating_source: null,
     }));
+}
+
+function normalizeRestaurantName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function dedupeRestaurantsByName<T extends { name: string }>(rows: T[]): T[] {
+  const byName = new Map<string, T>();
+  for (const row of rows) {
+    const key = normalizeRestaurantName(row.name);
+    if (!key) continue;
+    if (!byName.has(key)) byName.set(key, row);
+  }
+  return Array.from(byName.values());
+}
+
+type ExtractedTrendingRestaurant = {
+  name: string;
+  overview: string;
+  source_article_ids: string[];
+};
+
+async function enrichTrendingRestaurants(
+  restaurants: ExtractedTrendingRestaurant[]
+): Promise<{
+  restaurants: TrendingExtractionResult["restaurants"];
+  enrichedCount: number;
+  error?: string;
+}> {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) {
+    return {
+      restaurants: restaurants.map((r) => ({
+        ...r,
+        neighborhood: null,
+        price_level: null,
+        cuisine_vibes: [],
+        google_rating: null,
+        rating_source: null,
+      })),
+      enrichedCount: 0,
+      error: "OPENAI_API_KEY missing",
+    };
+  }
+
+  const prompt = `You are enriching Denver restaurant metadata.
+
+Input restaurants:
+${restaurants.map((r) => `- name="${r.name}" | overview="${r.overview}"`).join("\n")}
+
+For each restaurant, return:
+- name (same as input)
+- neighborhood (string or null)
+- price_level (integer 1..4 where 1=$ and 4=$$$$, or null)
+- cuisine_vibes (array of short strings, 1 to 6 items, or empty array)
+- google_rating (number 0.0..5.0 or null)
+- rating_source ("google" when rating is from known Google rating context, otherwise "llm_estimate" or null)
+- overview (optional improved 1-2 sentence summary)
+
+Rules:
+- Return every input restaurant exactly once.
+- Use null when unknown; do not fabricate specific facts.
+- Output ONLY valid JSON array.
+`;
+
+  try {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.2,
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      return {
+        restaurants: restaurants.map((r) => ({
+          ...r,
+          neighborhood: null,
+          price_level: null,
+          cuisine_vibes: [],
+          google_rating: null,
+          rating_source: null,
+        })),
+        enrichedCount: 0,
+        error: `OpenAI ${res.status}: ${text}`,
+      };
+    }
+    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    const content = data.choices?.[0]?.message?.content?.trim();
+    if (!content) {
+      return {
+        restaurants: restaurants.map((r) => ({
+          ...r,
+          neighborhood: null,
+          price_level: null,
+          cuisine_vibes: [],
+          google_rating: null,
+          rating_source: null,
+        })),
+        enrichedCount: 0,
+        error: "OpenAI enrichment response missing content",
+      };
+    }
+
+    const parsed = parseJsonArrayFromModel(content) as {
+      name?: string;
+      neighborhood?: string | null;
+      price_level?: number | null;
+      cuisine_vibes?: unknown;
+      google_rating?: number | null;
+      rating_source?: string | null;
+      overview?: string | null;
+    }[];
+
+    const byName = new Map<string, (typeof parsed)[number]>();
+    for (const row of parsed) {
+      const name = (row.name ?? "").trim();
+      const keyName = normalizeRestaurantName(name);
+      if (!keyName) continue;
+      if (!byName.has(keyName)) byName.set(keyName, row);
+    }
+
+    let enrichedCount = 0;
+    const merged = restaurants.map((r) => {
+      const enriched = byName.get(normalizeRestaurantName(r.name));
+      const neighborhood = sanitizeNullableText(enriched?.neighborhood);
+      const price_level = sanitizePriceLevel(enriched?.price_level);
+      const cuisine_vibes = sanitizeCuisineVibes(enriched?.cuisine_vibes);
+      const google_rating = sanitizeGoogleRating(enriched?.google_rating);
+      const rating_source = sanitizeNullableText(enriched?.rating_source);
+      const overview = sanitizeNullableText(enriched?.overview) ?? r.overview;
+
+      if (
+        neighborhood !== null ||
+        price_level !== null ||
+        cuisine_vibes.length > 0 ||
+        google_rating !== null
+      ) {
+        enrichedCount += 1;
+      }
+
+      return {
+        name: r.name,
+        overview,
+        source_article_ids: r.source_article_ids,
+        neighborhood,
+        price_level,
+        cuisine_vibes,
+        google_rating,
+        rating_source: rating_source ?? (google_rating != null ? "google" : null),
+      };
+    });
+
+    return { restaurants: merged, enrichedCount };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : "Unknown enrichment error";
+    return {
+      restaurants: restaurants.map((r) => ({
+        ...r,
+        neighborhood: null,
+        price_level: null,
+        cuisine_vibes: [],
+        google_rating: null,
+        rating_source: null,
+      })),
+      enrichedCount: 0,
+      error: message,
+    };
+  }
+}
+
+function sanitizeNullableText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed.slice(0, 120) : null;
+}
+
+function sanitizePriceLevel(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  const n = Math.round(value);
+  return n >= 1 && n <= 4 ? n : null;
+}
+
+function sanitizeGoogleRating(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  if (value < 0 || value > 5) return null;
+  return Math.round(value * 10) / 10;
+}
+
+function sanitizeCuisineVibes(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const v of value) {
+    if (typeof v !== "string") continue;
+    const trimmed = v.trim().toLowerCase();
+    if (!trimmed) continue;
+    if (trimmed.length > 40) continue;
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+    if (out.length >= 6) break;
+  }
+  return out;
 }

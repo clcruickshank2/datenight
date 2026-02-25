@@ -58,13 +58,23 @@ create table public.buzz_restaurants (
   website_url text null,
   image_url text null,
   overview text null,
+  neighborhood text null,
+  price_level integer null,
+  cuisine_vibes text[] not null default '{}'::text[],
   google_place_id text null,
   google_rating numeric null,
+  rating_source text null,
   source_article_ids uuid[] not null default '{}'::uuid[],
   fetched_at timestamp with time zone not null default now(),
   created_at timestamp with time zone not null default now(),
   updated_at timestamp with time zone not null default now(),
-  constraint buzz_restaurants_pkey primary key (id)
+  constraint buzz_restaurants_pkey primary key (id),
+  constraint buzz_restaurants_price_level_check check (
+    (
+      price_level is null
+      or ((price_level >= 1) and (price_level <= 4))
+    )
+  )
 ) TABLESPACE pg_default;
 
 create index IF not exists buzz_restaurants_name_idx on public.buzz_restaurants using btree (name) TABLESPACE pg_default;

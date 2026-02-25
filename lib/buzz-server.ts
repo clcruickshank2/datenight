@@ -160,12 +160,16 @@ export type BuzzRestaurant = {
   website_url: string | null;
   image_url: string | null;
   overview: string | null;
+  neighborhood: string | null;
+  price_level: number | null;
+  cuisine_vibes: string[];
   google_rating: number | null;
+  rating_source: string | null;
 };
 
 export async function fetchBuzzRestaurants(limit: number): Promise<BuzzRestaurant[]> {
   const { url, key } = getConfig();
-  const path = `${url}/rest/v1/buzz_restaurants?select=id,name,website_url,image_url,overview,google_rating&order=fetched_at.desc&limit=${limit}`;
+  const path = `${url}/rest/v1/buzz_restaurants?select=id,name,website_url,image_url,overview,neighborhood,price_level,cuisine_vibes,google_rating,rating_source&order=fetched_at.desc&limit=${limit}`;
   const res = await fetch(path, { headers: headers(key), cache: "no-store" });
   if (!res.ok) return [];
   return (await res.json()) as BuzzRestaurant[];
@@ -216,7 +220,11 @@ export async function insertBuzzRestaurants(
     website_url?: string | null;
     image_url?: string | null;
     overview?: string | null;
+    neighborhood?: string | null;
+    price_level?: number | null;
+    cuisine_vibes?: string[];
     google_rating?: number | null;
+    rating_source?: string | null;
     source_article_ids: string[];
   }[]
 ): Promise<{ error?: string }> {
@@ -227,7 +235,11 @@ export async function insertBuzzRestaurants(
     website_url: r.website_url ?? null,
     image_url: r.image_url ?? null,
     overview: r.overview ?? null,
+    neighborhood: r.neighborhood ?? null,
+    price_level: r.price_level ?? null,
+    cuisine_vibes: r.cuisine_vibes ?? [],
     google_rating: r.google_rating ?? null,
+    rating_source: r.rating_source ?? null,
     source_article_ids: r.source_article_ids,
   }));
   const res = await fetch(`${url}/rest/v1/buzz_restaurants`, {
@@ -243,6 +255,66 @@ export async function insertBuzzRestaurants(
     return { error: `Supabase ${res.status}: ${text}` };
   }
   return {};
+}
+
+export async function upsertTrendingIntoRestaurants(
+  rows: {
+    name: string;
+    neighborhood?: string | null;
+    price_level?: number | null;
+    cuisine_vibes?: string[];
+    overview?: string | null;
+    source_article_ids?: string[];
+  }[]
+): Promise<{ upserted: number; error?: string }> {
+  if (rows.length === 0) return { upserted: 0 };
+  const { url, key, profileId } = getConfigWithProfile();
+  if (!profileId) return { upserted: 0, error: "PROFILE_ID missing" };
+
+  const body = rows.map((r) => {
+    const price =
+      typeof r.price_level === "number" && Number.isFinite(r.price_level)
+        ? Math.round(r.price_level)
+        : null;
+    const safePrice = price != null && price >= 1 && price <= 4 ? price : null;
+    const vibes = Array.isArray(r.cuisine_vibes)
+      ? r.cuisine_vibes
+          .filter((v): v is string => typeof v === "string")
+          .map((v) => v.trim())
+          .filter((v) => v.length > 0)
+          .slice(0, 8)
+      : [];
+    const notesParts = [
+      "Seeded from The Buzz trending extraction.",
+      r.overview ? `Overview: ${r.overview}` : null,
+      r.source_article_ids?.length
+        ? `Source article IDs: ${r.source_article_ids.join(", ")}`
+        : null,
+    ].filter(Boolean);
+    return {
+      profile_id: profileId,
+      name: r.name.trim(),
+      neighborhood: r.neighborhood ?? null,
+      price_level: safePrice,
+      vibe_tags: vibes,
+      status: "active",
+      notes: notesParts.join(" | "),
+    };
+  });
+
+  const res = await fetch(`${url}/rest/v1/restaurants?on_conflict=profile_id,name`, {
+    method: "POST",
+    headers: {
+      ...headers(key),
+      Prefer: "resolution=merge-duplicates,return=minimal",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    return { upserted: 0, error: `Supabase ${res.status}: ${text}` };
+  }
+  return { upserted: body.length };
 }
 
 /** Profile's enabled source ids for curation. If none, use all enabled source ids. */
