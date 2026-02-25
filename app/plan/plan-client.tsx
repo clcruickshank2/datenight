@@ -45,6 +45,7 @@ type RecommendResponse = {
     hasGoogleMapsKey?: boolean;
     requestedCount?: number;
     preWebCount?: number;
+    excludeCount?: number;
   };
 };
 
@@ -315,6 +316,17 @@ function wantsDifferentRecommendations(text: string): boolean {
   return /(different|another|new)\s+(recommendation|option|pick|one)/.test(lower);
 }
 
+function wantsBroaden(text: string): boolean {
+  const lower = text.toLowerCase();
+  return /\b(broaden|broader|expand|widen)\b/.test(lower) && /\b(search|options|results)\b/.test(lower);
+}
+
+function wantsTighten(text: string): boolean {
+  const lower = text.toLowerCase();
+  return /\b(tighten|narrow|stricter|more focused|focus)\b/.test(lower) &&
+    /\b(recommendation|recommendations|options|results|search)\b/.test(lower);
+}
+
 function parseVibeInput(value: string): string[] {
   return uniquePhrases(value.split(/[,;]/));
 }
@@ -376,10 +388,11 @@ export function PlanClient({ profile }: Props) {
     mode: "default" | "regenerate" | "tighten" | "broaden" = "default",
     offset: number = recommendationOffset
   ) => {
+    const excludeIds = mode === "broaden" ? recommendations.map((r) => r.id) : [];
     const res = await fetch("/api/plan/recommend", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ criteria: nextCriteria, mode, offset }),
+      body: JSON.stringify({ criteria: nextCriteria, mode, offset, excludeIds }),
     });
     if (!res.ok) throw new Error("recommend endpoint failed");
     const data = (await res.json()) as RecommendResponse;
@@ -387,7 +400,7 @@ export function PlanClient({ profile }: Props) {
     setConfidence(data.confidence ?? 0);
     setSourceMode(data.sourceMode ?? "db");
     setRecDebug(
-      `mode=${data.debug.mode} · base=${data.debug.baseCandidateCount} · filtered=${data.debug.filteredCandidateCount} · preWeb=${data.debug.preWebCount ?? "n/a"} · working=${data.debug.workingCandidateCount} · webAdded=${data.debug.webAdded} · llmRerank=${String(data.debug.llmRerankUsed)} · relaxed=${String(data.debug.constraintRelaxed ?? false)} · requested=${data.debug.requestedCount ?? 3} · googleLive=${data.debug.googleLiveEnrichedCount ?? 0} · hasMapsKey=${String(data.debug.hasGoogleMapsKey ?? false)}`
+      `mode=${data.debug.mode} · base=${data.debug.baseCandidateCount} · filtered=${data.debug.filteredCandidateCount} · preWeb=${data.debug.preWebCount ?? "n/a"} · working=${data.debug.workingCandidateCount} · webAdded=${data.debug.webAdded} · excluded=${data.debug.excludeCount ?? 0} · llmRerank=${String(data.debug.llmRerankUsed)} · relaxed=${String(data.debug.constraintRelaxed ?? false)} · requested=${data.debug.requestedCount ?? 3} · googleLive=${data.debug.googleLiveEnrichedCount ?? 0} · hasMapsKey=${String(data.debug.hasGoogleMapsKey ?? false)}`
     );
   };
 
@@ -480,6 +493,8 @@ export function PlanClient({ profile }: Props) {
 
       const nextPrompt = getNextPrompt(nextCriteria);
       const wantsRecommendations = isRecommendationRequest(text);
+      const isBroadenRequest = wantsBroaden(text);
+      const isTightenRequest = wantsTighten(text);
       const shouldRecommend = wantsRecommendations || isCriteriaComplete(nextCriteria);
       let nextOffset = recommendationOffset;
       if (wantsDifferentRecommendations(text)) {
@@ -490,7 +505,13 @@ export function PlanClient({ profile }: Props) {
         try {
           await fetchRecommendations(
             nextCriteria,
-            wantsDifferentRecommendations(text) ? "regenerate" : "default",
+            isTightenRequest
+              ? "tighten"
+              : isBroadenRequest
+              ? "broaden"
+              : wantsDifferentRecommendations(text)
+                ? "regenerate"
+                : "default",
             nextOffset
           );
         } catch {
@@ -500,7 +521,9 @@ export function PlanClient({ profile }: Props) {
       const botText = nextPrompt
         ? nextPrompt
         : shouldRecommend
-          ? "Perfect. Here are your top 3 high-confidence picks below."
+          ? isTightenRequest
+            ? "Perfect. Here are your top 2 highest-confidence picks below."
+            : "Perfect. Here are your top 3 high-confidence picks below."
           : data.assistantMessage?.trim() ||
             "Got it. I updated your criteria and recommendations.";
       setMessages((m) => [...m, { role: "bot", text: botText }]);
@@ -521,6 +544,8 @@ export function PlanClient({ profile }: Props) {
       setDebugInfo("Fallback parser used (AI endpoint unavailable or errored).");
       const nextPrompt = getNextPrompt(nextCriteria);
       const wantsRecommendations = isRecommendationRequest(text);
+      const isBroadenRequest = wantsBroaden(text);
+      const isTightenRequest = wantsTighten(text);
       const shouldRecommend = wantsRecommendations || isCriteriaComplete(nextCriteria);
       let nextOffset = recommendationOffset;
       if (wantsDifferentRecommendations(text)) {
@@ -531,7 +556,13 @@ export function PlanClient({ profile }: Props) {
         try {
           await fetchRecommendations(
             nextCriteria,
-            wantsDifferentRecommendations(text) ? "regenerate" : "default",
+            isTightenRequest
+              ? "tighten"
+              : isBroadenRequest
+              ? "broaden"
+              : wantsDifferentRecommendations(text)
+                ? "regenerate"
+                : "default",
             nextOffset
           );
         } catch {
@@ -545,7 +576,9 @@ export function PlanClient({ profile }: Props) {
           text: nextPrompt
             ? nextPrompt
             : shouldRecommend
-              ? "Got it. I refreshed your top 3 picks below."
+              ? isTightenRequest
+                ? "Got it. I tightened this to your top 2 picks below."
+                : "Got it. I refreshed your top 3 picks below."
               : "Got it. I updated your criteria and refreshed recommendations.",
         },
       ]);

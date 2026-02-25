@@ -33,11 +33,18 @@ function cleanText(input: string): string {
     .trim();
 }
 
+function getSourceLogoUrl(baseUrl: string | null | undefined): string | null {
+  if (!baseUrl) return null;
+  return `https://www.google.com/s2/favicons?domain_url=${encodeURIComponent(baseUrl)}&sz=128`;
+}
+
 function shouldShowArticleImage(sourceId: string, imageUrl: string | null): boolean {
-  // Reddit feed thumbnails are often unreliable/hotlink-blocked.
+  // Prefer source-logo fallback for noisy sources and untrusted image hosts.
   if (sourceId === "reddit-denverfood") return false;
   if (!imageUrl) return false;
-  return /^https?:\/\//i.test(imageUrl);
+  if (!/^https?:\/\//i.test(imageUrl)) return false;
+  if (/reddit|preview\.redd\.it|external-preview\.redd\.it/i.test(imageUrl)) return false;
+  return true;
 }
 
 function formatPriceLevel(priceLevel: number | null): string {
@@ -70,6 +77,7 @@ export default async function BuzzPage() {
   }
 
   const sourceMap = new Map(sources.map((s) => [s.id, s.name]));
+  const sourceById = new Map(sources.map((s) => [s.id, s]));
   const hasCuratedPicks = articles.some((a) => a.curated_rank != null);
 
   return (
@@ -115,8 +123,15 @@ export default async function BuzzPage() {
                         className="h-24 w-full rounded-lg object-cover sm:h-28 sm:w-40"
                       />
                     ) : (
-                      <div className="flex h-24 w-full items-center justify-center rounded-lg bg-gradient-to-br from-slate-100 to-slate-200 px-3 text-center sm:h-28 sm:w-40">
-                        <span className="text-xs font-medium uppercase tracking-wide text-slate-600">
+                      <div className="flex h-24 w-full flex-col items-center justify-center rounded-lg bg-gradient-to-br from-slate-100 to-slate-200 px-3 text-center sm:h-28 sm:w-40">
+                        {getSourceLogoUrl(sourceById.get(a.source_id)?.base_url) && (
+                          <img
+                            src={getSourceLogoUrl(sourceById.get(a.source_id)?.base_url) ?? undefined}
+                            alt=""
+                            className="mb-2 h-7 w-7 rounded"
+                          />
+                        )}
+                        <span className="text-[10px] font-medium uppercase tracking-wide text-slate-600">
                           {cleanText(sourceMap.get(a.source_id) ?? a.source_id)}
                         </span>
                       </div>
@@ -167,16 +182,16 @@ export default async function BuzzPage() {
             <p className="text-slate-600">No trending restaurants yet. Run the Buzz cron to extract and enrich them from curated coverage.</p>
           </div>
         ) : (
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full min-w-[980px] border-collapse text-sm">
+          <div className="mt-4">
+            <table className="w-full table-fixed border-collapse text-sm">
               <thead>
                 <tr className="border-b border-slate-200 text-left text-slate-500">
-                  <th className="py-2 pr-2 font-medium">Restaurant</th>
-                  <th className="py-2 pr-2 font-medium">Neighborhood</th>
-                  <th className="py-2 pr-2 font-medium">Price</th>
-                  <th className="py-2 pr-2 font-medium">Tags</th>
-                  <th className="py-2 pr-2 font-medium">Overview</th>
-                  <th className="py-2 w-20 font-medium text-right">Rating</th>
+                  <th className="w-[22%] py-2 pr-2 font-medium">Restaurant</th>
+                  <th className="w-[14%] py-2 pr-2 font-medium">Neighborhood</th>
+                  <th className="w-[8%] py-2 pr-2 font-medium">Price</th>
+                  <th className="w-[22%] py-2 pr-2 font-medium">Tags</th>
+                  <th className="w-[28%] py-2 pr-2 font-medium">Overview</th>
+                  <th className="w-[6%] py-2 font-medium text-right">Rating</th>
                 </tr>
               </thead>
               <tbody>

@@ -769,6 +769,7 @@ export async function POST(req: NextRequest) {
     criteria?: PlanCriteria;
     mode?: "default" | "regenerate" | "tighten" | "broaden";
     offset?: number;
+    excludeIds?: string[];
   };
   const criteria = body.criteria ?? {};
   const normalizedCriteria: PlanCriteria = {
@@ -789,6 +790,11 @@ export async function POST(req: NextRequest) {
   const mode = body.mode ?? "default";
   const offset = typeof body.offset === "number" ? body.offset : 0;
   const requestedCount = mode === "tighten" ? 2 : 3;
+  const excludeIds = new Set(
+    Array.isArray(body.excludeIds)
+      ? body.excludeIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+      : []
+  );
 
   let profile;
   let restaurants;
@@ -851,9 +857,20 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const rerank = await rerankWithLlm(normalizedCriteria, workingCandidates);
+  const candidatesForRerank =
+    excludeIds.size > 0
+      ? workingCandidates.filter((c) => !excludeIds.has(c.id))
+      : workingCandidates;
+  const rerankSource =
+    candidatesForRerank.length >= requestedCount ? candidatesForRerank : workingCandidates;
+  const rerank = await rerankWithLlm(normalizedCriteria, rerankSource);
   let recommendations: Recommendation[] = rerank.picks;
-  const ranked = workingCandidates
+  const rankedBase =
+    excludeIds.size > 0
+      ? workingCandidates.filter((c) => !excludeIds.has(c.id))
+      : workingCandidates;
+  const rankedSource = rankedBase.length >= requestedCount ? rankedBase : workingCandidates;
+  const ranked = rankedSource
     .map((c) => ({
       c,
       ...scoreCandidate(
@@ -865,7 +882,7 @@ export async function POST(req: NextRequest) {
       ),
     }))
     .sort((a, b) => b.score - a.score);
-  const start = workingCandidates.length > 0 ? offset % Math.max(1, ranked.length) : 0;
+  const start = ranked.length > 0 ? offset % Math.max(1, ranked.length) : 0;
   const rotated = ranked.slice(start).concat(ranked.slice(0, start));
   const fallbackRecommendations = rotated.map((r) => ({
     id: r.c.id,
@@ -964,6 +981,7 @@ export async function POST(req: NextRequest) {
       hasGoogleMapsKey: Boolean(process.env.GOOGLE_MAPS_API_KEY),
       requestedCount,
       preWebCount,
+      excludeCount: excludeIds.size,
     },
   });
 }
