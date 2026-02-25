@@ -12,6 +12,13 @@ type ChatCriteria = {
   maxPrice?: number | null;
 };
 
+function parseDateIso(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const v = value.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return undefined;
+  return v;
+}
+
 function normalizeTag(tag: string): string {
   return tag
     .toLowerCase()
@@ -154,14 +161,8 @@ ${message}`;
       : [];
 
     const criteriaPatch: ChatCriteria & { vibeTagsToAdd: string[] } = {
-      dateStart:
-        typeof rawPatch.dateStart === "string" && rawPatch.dateStart.trim().length > 0
-          ? rawPatch.dateStart.trim()
-          : undefined,
-      dateEnd:
-        typeof rawPatch.dateEnd === "string" && rawPatch.dateEnd.trim().length > 0
-          ? rawPatch.dateEnd.trim()
-          : undefined,
+      dateStart: parseDateIso(rawPatch.dateStart),
+      dateEnd: parseDateIso(rawPatch.dateEnd),
       partySize:
         typeof rawPatch.partySize === "number" && rawPatch.partySize >= 1 && rawPatch.partySize <= 20
           ? rawPatch.partySize
@@ -185,6 +186,17 @@ ${message}`;
       const swappedMin = criteriaPatch.maxPrice;
       criteriaPatch.maxPrice = criteriaPatch.minPrice;
       criteriaPatch.minPrice = swappedMin;
+    }
+
+    // Treat "next week" as today through the next 7 days.
+    const messageLower = message.toLowerCase();
+    if (/\bnext week\b/.test(messageLower)) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const end = new Date(today);
+      end.setDate(end.getDate() + 7);
+      criteriaPatch.dateStart = today.toISOString().slice(0, 10);
+      criteriaPatch.dateEnd = end.toISOString().slice(0, 10);
     }
 
     return Response.json({

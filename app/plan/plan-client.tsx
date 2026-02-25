@@ -38,6 +38,7 @@ type RecommendResponse = {
     webAdded: number;
     llmRerankUsed: boolean;
     offset: number;
+    constraintRelaxed?: boolean;
   };
 };
 
@@ -234,12 +235,8 @@ function parseMessageForCriteria(text: string): Partial<PlanCriteria> {
     out.dateStart = todayStr;
     out.dateEnd = addDays(today, days);
   } else if (/\bnext week\b/.test(lower) && !out.dateStart) {
-    const start = new Date(today);
-    start.setDate(start.getDate() + 7);
-    const end = new Date(start);
-    end.setDate(end.getDate() + 6);
-    out.dateStart = start.toISOString().slice(0, 10);
-    out.dateEnd = end.toISOString().slice(0, 10);
+    out.dateStart = todayStr;
+    out.dateEnd = addDays(today, 7);
   } else if (/\bnext month\b/.test(lower) && !out.dateStart) {
     out.dateStart = todayStr;
     out.dateEnd = addDays(today, 31);
@@ -328,10 +325,11 @@ export function PlanClient({ profile }: Props) {
       partySize: profile.party_size,
       // Start empty so chat intent drives tags instead of sticky defaults.
       vibeTags: [],
-      minPrice: profile.price_min,
-      maxPrice: profile.price_max,
+      // If user doesn't specify budget, default to full range.
+      minPrice: 1,
+      maxPrice: 4,
     }),
-    [profile.party_size, profile.price_min, profile.price_max]
+    [profile.party_size]
   );
 
   const [criteria, setCriteria] = useState<PlanCriteria>(defaultCriteria);
@@ -383,7 +381,7 @@ export function PlanClient({ profile }: Props) {
     setConfidence(data.confidence ?? 0);
     setSourceMode(data.sourceMode ?? "db");
     setRecDebug(
-      `mode=${data.debug.mode} · base=${data.debug.baseCandidateCount} · filtered=${data.debug.filteredCandidateCount} · working=${data.debug.workingCandidateCount} · webAdded=${data.debug.webAdded} · llmRerank=${String(data.debug.llmRerankUsed)}`
+      `mode=${data.debug.mode} · base=${data.debug.baseCandidateCount} · filtered=${data.debug.filteredCandidateCount} · working=${data.debug.workingCandidateCount} · webAdded=${data.debug.webAdded} · llmRerank=${String(data.debug.llmRerankUsed)} · relaxed=${String(data.debug.constraintRelaxed ?? false)}`
     );
   };
 

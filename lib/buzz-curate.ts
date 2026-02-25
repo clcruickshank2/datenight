@@ -446,7 +446,7 @@ If unsure, exclude the item.`;
         telemetry
       );
       if (verified.restaurants.length > 0) {
-        const enriched = await enrichTrendingRestaurants(verified.restaurants);
+        const enriched = await enrichTrendingRestaurants(verified.restaurants, telemetry);
         return {
           restaurants: enriched.restaurants,
           method: "llm",
@@ -500,7 +500,7 @@ Return ONLY JSON object:
         telemetry
       );
       if (verified.restaurants.length > 0) {
-        const enriched = await enrichTrendingRestaurants(verified.restaurants);
+        const enriched = await enrichTrendingRestaurants(verified.restaurants, telemetry);
         return {
           restaurants: enriched.restaurants,
           method: "llm",
@@ -553,7 +553,10 @@ Return ONLY JSON object:
             .join("; "),
         };
       }
-      const enrichedFallback = await enrichTrendingRestaurants(verifiedFallback.restaurants);
+      const enrichedFallback = await enrichTrendingRestaurants(
+        verifiedFallback.restaurants,
+        telemetry
+      );
       return {
         restaurants: enrichedFallback.restaurants,
         method: "heuristic",
@@ -586,7 +589,8 @@ Return ONLY JSON object:
           name: r.name,
           overview: r.overview,
           source_article_ids: r.source_article_ids,
-        }))
+        })),
+        telemetry
       );
       return {
         restaurants: enrichedFallback.restaurants,
@@ -941,7 +945,8 @@ type ExtractedTrendingRestaurant = {
 };
 
 async function enrichTrendingRestaurants(
-  restaurants: ExtractedTrendingRestaurant[]
+  restaurants: ExtractedTrendingRestaurant[],
+  telemetry?: LlmTelemetry
 ): Promise<{
   restaurants: TrendingExtractionResult["restaurants"];
   enrichedCount: number;
@@ -984,6 +989,10 @@ Rules:
 `;
 
   try {
+    if (telemetry) {
+      telemetry.llm_calls += 1;
+      telemetry.stages.push("enrich:started");
+    }
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -996,8 +1005,13 @@ Rules:
         temperature: 0.2,
       }),
     });
+    if (telemetry) {
+      const requestId = res.headers.get("x-request-id");
+      if (requestId) telemetry.request_ids.push(requestId);
+    }
     if (!res.ok) {
       const text = await res.text();
+      if (telemetry) telemetry.stages.push(`enrich:http_${res.status}`);
       return {
         restaurants: restaurants.map((r) => ({
           ...r,
@@ -1014,6 +1028,7 @@ Rules:
     const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
     const content = data.choices?.[0]?.message?.content?.trim();
     if (!content) {
+      if (telemetry) telemetry.stages.push("enrich:empty_content");
       return {
         restaurants: restaurants.map((r) => ({
           ...r,
@@ -1077,9 +1092,12 @@ Rules:
       };
     });
 
+    if (telemetry) telemetry.stages.push(`enrich:ok_${enrichedCount}`);
+
     return { restaurants: merged, enrichedCount };
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown enrichment error";
+    if (telemetry) telemetry.stages.push("enrich:exception");
     return {
       restaurants: restaurants.map((r) => ({
         ...r,

@@ -183,8 +183,8 @@ function scoreCandidate(c: Candidate, criteria: PlanCriteria, profileNeighborhoo
     reasons.push("in your preferred area");
   }
 
-  const min = criteria.minPrice ?? profileMin;
-  const max = criteria.maxPrice ?? profileMax;
+  const min = criteria.minPrice ?? profileMin ?? 1;
+  const max = criteria.maxPrice ?? profileMax ?? 4;
   if (c.priceLevel != null) {
     if (c.priceLevel >= min && c.priceLevel <= max) {
       score += 4;
@@ -323,6 +323,20 @@ async function webAugment(criteria: PlanCriteria): Promise<Candidate[]> {
   }
 }
 
+function relaxCuisineTags(tags: string[]): string[] {
+  const normalized = unique(tags);
+  const cuisineIntent = cuisineIntentFromTags(normalized);
+  if (cuisineIntent.length <= 1) return normalized;
+  // If multiple cuisines were inferred, keep the first explicit one to avoid over-constraining.
+  const primary = cuisineIntent[0];
+  return normalized.filter((t) => {
+    if (HARD_DIETARY.has(t)) return true;
+    const tagCuisine = cuisineIntentFromTags([t]);
+    if (tagCuisine.length === 0) return true;
+    return tagCuisine.includes(primary);
+  });
+}
+
 function dedupeCandidates(list: Candidate[]): Candidate[] {
   const out: Candidate[] = [];
   const seen = new Set<string>();
@@ -453,6 +467,21 @@ export async function POST(req: NextRequest) {
     offset?: number;
   };
   const criteria = body.criteria ?? {};
+  const normalizedCriteria: PlanCriteria = {
+    ...criteria,
+    minPrice: criteria.minPrice ?? 1,
+    maxPrice: criteria.maxPrice ?? 4,
+    vibeTags: unique(criteria.vibeTags ?? []),
+  };
+  if (
+    normalizedCriteria.minPrice != null &&
+    normalizedCriteria.maxPrice != null &&
+    normalizedCriteria.minPrice > normalizedCriteria.maxPrice
+  ) {
+    const t = normalizedCriteria.minPrice;
+    normalizedCriteria.minPrice = normalizedCriteria.maxPrice;
+    normalizedCriteria.maxPrice = t;
+  }
   const mode = body.mode ?? "default";
   const offset = typeof body.offset === "number" ? body.offset : 0;
 
@@ -471,15 +500,26 @@ export async function POST(req: NextRequest) {
   }
 
   const dbCandidates = restaurants.map(candidateFromRestaurant);
-  const filtered = dbCandidates.filter((c) => matchesHardConstraints(c, criteria));
-  const candidatesForScore = mode === "broaden" && filtered.length < 8 ? filtered : filtered;
+  let filtered = dbCandidates.filter((c) => matchesHardConstraints(c, normalizedCriteria));
+  let constraintRelaxed = false;
+  if (filtered.length === 0 && (normalizedCriteria.vibeTags?.length ?? 0) > 0) {
+    // Keep dietary hard filters, but relax accidental multi-cuisine collisions.
+    const relaxedTags = relaxCuisineTags(normalizedCriteria.vibeTags ?? []);
+    const relaxedCriteria: PlanCriteria = { ...normalizedCriteria, vibeTags: relaxedTags };
+    filtered = dbCandidates.filter((c) => matchesHardConstraints(c, relaxedCriteria));
+    if (filtered.length > 0) {
+      normalizedCriteria.vibeTags = relaxedTags;
+      constraintRelaxed = true;
+    }
+  }
+  const candidatesForScore = filtered;
 
   const scored = candidatesForScore
     .map((c) => ({
       candidate: c,
       ...scoreCandidate(
         c,
-        criteria,
+        normalizedCriteria,
         (profile.neighborhoods || []).map(normalize),
         profile.price_min,
         profile.price_max
@@ -488,7 +528,7 @@ export async function POST(req: NextRequest) {
     .sort((a, b) => b.score - a.score);
 
   let workingCandidates = scored.map((s) => s.candidate);
-  const baseConfidence = confidenceScore(workingCandidates, criteria);
+  const baseConfidence = confidenceScore(workingCandidates, normalizedCriteria);
 
   let sourceMode: "db" | "hybrid" = "db";
   let webAdded = 0;
@@ -497,7 +537,7 @@ export async function POST(req: NextRequest) {
     workingCandidates.length < 6 ||
     baseConfidence < 0.65;
   if (needWebAugmentation) {
-    const webCandidates = await webAugment(criteria);
+    const webCandidates = await webAugment(normalizedCriteria);
     webAdded = webCandidates.length;
     if (webCandidates.length > 0) {
       workingCandidates = dedupeCandidates([...workingCandidates, ...webCandidates]);
@@ -505,7 +545,7 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const rerank = await rerankWithLlm(criteria, workingCandidates);
+  const rerank = await rerankWithLlm(normalizedCriteria, workingCandidates);
   let recommendations: Recommendation[] = rerank.picks;
   if (recommendations.length === 0) {
     const ranked = workingCandidates
@@ -513,7 +553,7 @@ export async function POST(req: NextRequest) {
         c,
         ...scoreCandidate(
           c,
-          criteria,
+          normalizedCriteria,
           (profile.neighborhoods || []).map(normalize),
           profile.price_min,
           profile.price_max
@@ -545,7 +585,7 @@ export async function POST(req: NextRequest) {
       source: r.source,
       tagsText: "",
     })),
-    criteria
+    normalizedCriteria
   );
 
   return Response.json({
@@ -560,6 +600,7 @@ export async function POST(req: NextRequest) {
       webAdded,
       llmRerankUsed: rerank.llmUsed,
       offset,
+      constraintRelaxed,
     },
   });
 }

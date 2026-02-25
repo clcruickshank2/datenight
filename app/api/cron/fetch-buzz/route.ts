@@ -351,6 +351,11 @@ export async function GET(request: NextRequest) {
   let trendingError: string | undefined;
   let trendingExtracted = 0;
   let trendingEnriched = 0;
+  let trendingTelemetry: {
+    llm_calls: number;
+    request_ids: string[];
+    stages: string[];
+  } | null = null;
   if (process.env.OPENAI_API_KEY) {
     try {
       const curatedArticles = await fetchCuratedBuzzArticles(5);
@@ -374,6 +379,7 @@ export async function GET(request: NextRequest) {
         );
 
         const extracted = await extractTrendingRestaurants(enriched, sourceNames);
+        trendingTelemetry = extracted.telemetry ?? null;
         trendingExtracted = extracted.extracted_count ?? extracted.restaurants.length;
         trendingEnriched = extracted.enriched_count ?? 0;
         if (extracted.restaurants.length > 0) {
@@ -407,6 +413,7 @@ export async function GET(request: NextRequest) {
                 inserted: trendingInserted,
                 seeded_to_restaurants: trendingSeeded,
                 method: trendingMethod,
+                telemetry: trendingTelemetry,
                 error: trendingError ?? null,
               },
             });
@@ -479,6 +486,7 @@ export async function GET(request: NextRequest) {
       inserted: trendingInserted,
       seeded_to_restaurants: trendingSeeded,
       method: trendingMethod,
+      telemetry: trendingTelemetry,
       error: trendingError ?? null,
     },
   });
