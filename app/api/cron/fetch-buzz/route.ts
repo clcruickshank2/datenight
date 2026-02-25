@@ -1,5 +1,13 @@
 import { NextRequest } from "next/server";
-import { fetchBuzzSourcesWithFeeds, upsertBuzzArticles } from "@/lib/buzz-server";
+import {
+  fetchBuzzSourcesWithFeeds,
+  fetchBuzzSources,
+  fetchRecentBuzzArticlesForCuration,
+  upsertBuzzArticles,
+  clearBuzzCuratedRanks,
+  setBuzzCuratedRanks,
+} from "@/lib/buzz-server";
+import { pickCuratedArticleUrls } from "@/lib/buzz-curate";
 import { parseRss, normalizePubDate } from "@/lib/rss";
 
 export const dynamic = "force-dynamic";
@@ -74,5 +82,25 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  return Response.json({ ok: true, sources: results.length, results });
+  // Curate: have OpenAI pick 5 best articles (requires OPENAI_API_KEY)
+  let curated = 0;
+  if (process.env.OPENAI_API_KEY) {
+    try {
+      const recent = await fetchRecentBuzzArticlesForCuration(50);
+      if (recent.length >= 5) {
+        const allSources = await fetchBuzzSources();
+        const sourceNames = new Map(allSources.map((s) => [s.id, s.name]));
+        const urls = await pickCuratedArticleUrls(recent, sourceNames);
+        if (urls.length >= 5) {
+          await clearBuzzCuratedRanks();
+          const err = await setBuzzCuratedRanks(urls);
+          if (!err.error) curated = urls.length;
+        }
+      }
+    } catch {
+      // Curation is best-effort; don't fail the cron
+    }
+  }
+
+  return Response.json({ ok: true, sources: results.length, results, curated });
 }

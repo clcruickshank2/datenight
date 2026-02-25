@@ -69,7 +69,7 @@ export async function fetchProfile(): Promise<Profile | null> {
 export async function fetchRestaurantsForProfile(): Promise<Restaurant[]> {
   const { url, key, profileId } = getConfig();
   const res = await fetch(
-    `${url}/rest/v1/restaurants?profile_id=eq.${profileId}&select=id,name,neighborhood,status,booking_url,platform,notes&order=name.asc`,
+    `${url}/rest/v1/restaurants?profile_id=eq.${profileId}&select=id,name,neighborhood,status,booking_url,platform,notes,vibe_tags&order=name.asc`,
     { headers: headers(key), cache: "no-store" }
   );
   if (!res.ok) return [];

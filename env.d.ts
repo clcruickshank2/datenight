@@ -7,5 +7,6 @@ declare namespace NodeJS {
     TWILIO_ACCOUNT_SID?: string;
     TWILIO_AUTH_TOKEN?: string;
     TWILIO_FROM_PHONE?: string;
+    OPENAI_API_KEY?: string;
   }
 }

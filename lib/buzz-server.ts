@@ -43,6 +43,7 @@ export type BuzzArticle = {
   image_url: string | null;
   published_at: string | null;
   fetched_at: string;
+  curated_rank?: number | null;
 };
 
 /** All enabled sources with a feed_url (for cron). */
@@ -67,16 +68,62 @@ export async function fetchBuzzSources(): Promise<BuzzSource[]> {
   return (await res.json()) as BuzzSource[];
 }
 
-/** Curated articles: limit, optional source_ids filter, order by published_at desc. */
+/** Curated articles: show 5 with curated_rank 1-5 first; if fewer than 5 curated, fill with latest. Optional source_ids filter. */
 export async function fetchBuzzArticles(limit: number, sourceIds?: string[]): Promise<BuzzArticle[]> {
   const { url, key } = getConfig();
-  let path = `${url}/rest/v1/buzz_articles?select=id,source_id,title,url,summary,image_url,published_at,fetched_at&order=published_at.desc.nullslast,fetched_at.desc&limit=${limit}`;
-  if (sourceIds?.length) {
-    path += `&source_id=in.(${sourceIds.join(",")})`;
-  }
+  const select = "id,source_id,title,url,summary,image_url,published_at,fetched_at,curated_rank";
+  const sourceFilter = sourceIds?.length ? `&source_id=in.(${sourceIds.join(",")})` : "";
+  // Curated first (rank 1-5), then by recency
+  let path = `${url}/rest/v1/buzz_articles?select=${select}&order=curated_rank.asc.nullslast,published_at.desc.nullslast,fetched_at.desc&limit=${limit}${sourceFilter}`;
   const res = await fetch(path, { headers: headers(key), cache: "no-store" });
   if (!res.ok) return [];
-  return (await res.json()) as BuzzArticle[];
+  const all = (await res.json()) as BuzzArticle[];
+  // If we have at least one curated, take only curated (so we don't mix curated + uncurated)
+  const curated = all.filter((a) => a.curated_rank != null);
+  if (curated.length >= limit) return curated.slice(0, limit);
+  if (curated.length > 0) return curated;
+  return all.slice(0, limit);
+}
+
+/** Recent articles for LLM curation (cron): last N by fetched_at, with title/summary/source for picking. */
+export async function fetchRecentBuzzArticlesForCuration(limit: number): Promise<{ id: string; title: string; url: string; summary: string | null; source_id: string }[]> {
+  const { url, key } = getConfig();
+  const path = `${url}/rest/v1/buzz_articles?select=id,title,url,summary,source_id&order=fetched_at.desc&limit=${limit}`;
+  const res = await fetch(path, { headers: headers(key), cache: "no-store" });
+  if (!res.ok) return [];
+  return (await res.json()) as { id: string; title: string; url: string; summary: string | null; source_id: string }[];
+}
+
+/** Clear curated_rank 1-5 (before setting new picks). */
+export async function clearBuzzCuratedRanks(): Promise<{ error?: string }> {
+  const { url, key } = getConfig();
+  const res = await fetch(`${url}/rest/v1/buzz_articles?curated_rank=in.(1,2,3,4,5)`, {
+    method: "PATCH",
+    headers: headers(key),
+    body: JSON.stringify({ curated_rank: null }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    return { error: `Supabase ${res.status}: ${text}` };
+  }
+  return {};
+}
+
+/** Set curated_rank 1-5 for articles by url (order = rank). */
+export async function setBuzzCuratedRanks(orderedUrls: string[]): Promise<{ error?: string }> {
+  const { url, key } = getConfig();
+  for (let i = 0; i < Math.min(5, orderedUrls.length); i++) {
+    const res = await fetch(`${url}/rest/v1/buzz_articles?url=eq.${encodeURIComponent(orderedUrls[i])}`, {
+      method: "PATCH",
+      headers: headers(key),
+      body: JSON.stringify({ curated_rank: i + 1 }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      return { error: `Supabase ${res.status}: ${text}` };
+    }
+  }
+  return {};
 }
 
 /** Profile's enabled source ids for curation. If none, use all enabled source ids. */
