@@ -36,7 +36,18 @@ export type TrendingExtractionResult = {
   method?: "llm" | "heuristic";
   extracted_count?: number;
   enriched_count?: number;
+  telemetry?: {
+    llm_calls: number;
+    request_ids: string[];
+    stages: string[];
+  };
   error?: string;
+};
+
+type LlmTelemetry = {
+  llm_calls: number;
+  request_ids: string[];
+  stages: string[];
 };
 
 function parseJsonArrayFromModel(content: string): unknown[] {
@@ -342,9 +353,14 @@ export async function extractTrendingRestaurants(
   articles: ArticleForCuration[],
   sourceNames: Map<string, string>
 ): Promise<TrendingExtractionResult> {
+  const telemetry: LlmTelemetry = {
+    llm_calls: 0,
+    request_ids: [],
+    stages: [],
+  };
   const key = process.env.OPENAI_API_KEY;
-  if (!key) return { restaurants: [], error: "OPENAI_API_KEY missing" };
-  if (articles.length === 0) return { restaurants: [], error: "No curated articles provided" };
+  if (!key) return { restaurants: [], error: "OPENAI_API_KEY missing", telemetry };
+  if (articles.length === 0) return { restaurants: [], error: "No curated articles provided", telemetry };
 
   const list = articles.map((a, idx) => ({
     ref: `A${idx + 1}`,
@@ -386,7 +402,9 @@ Return ONLY a JSON object:
       strictPrompt,
       key,
       articles,
-      refToId
+      refToId,
+      telemetry,
+      "extract_strict"
     );
 
     let extracted = strictAttempt.restaurants;
@@ -409,7 +427,9 @@ If unsure, exclude the item.`;
         retryPrompt,
         key,
         articles,
-        refToId
+        refToId,
+        telemetry,
+        "extract_retry"
       );
       extracted = retryAttempt.restaurants;
       extractionError = [extractionError, retryAttempt.error].filter(Boolean).join("; ");
@@ -422,7 +442,8 @@ If unsure, exclude the item.`;
         list,
         key,
         refToId,
-        idToRef
+        idToRef,
+        telemetry
       );
       if (verified.restaurants.length > 0) {
         const enriched = await enrichTrendingRestaurants(verified.restaurants);
@@ -431,6 +452,7 @@ If unsure, exclude the item.`;
           method: "llm",
           extracted_count: verified.restaurants.length,
           enriched_count: enriched.enrichedCount,
+          telemetry,
           error: [extractionError, verified.error, enriched.error]
             .filter(Boolean)
             .join("; ") || undefined,
@@ -461,7 +483,9 @@ Return ONLY JSON object:
       namesOnlyPrompt,
       key,
       articles,
-      refToId
+      refToId,
+      telemetry,
+      "extract_names_only"
     );
     const namesOnlyRows = dedupeRestaurantsByName(namesOnly.restaurants)
       .filter((r) => isPlausibleRestaurantName(r.name))
@@ -472,7 +496,8 @@ Return ONLY JSON object:
         list,
         key,
         refToId,
-        idToRef
+        idToRef,
+        telemetry
       );
       if (verified.restaurants.length > 0) {
         const enriched = await enrichTrendingRestaurants(verified.restaurants);
@@ -481,6 +506,7 @@ Return ONLY JSON object:
           method: "llm",
           extracted_count: verified.restaurants.length,
           enriched_count: enriched.enrichedCount,
+          telemetry,
           error: [extractionError, namesOnly.error, verified.error, enriched.error]
             .filter(Boolean)
             .join("; ") || undefined,
@@ -508,7 +534,8 @@ Return ONLY JSON object:
         list,
         key,
         refToId,
-        idToRef
+        idToRef,
+        telemetry
       );
       if (verifiedFallback.restaurants.length === 0) {
         return {
@@ -516,6 +543,7 @@ Return ONLY JSON object:
           method: "heuristic",
           extracted_count: 0,
           enriched_count: 0,
+          telemetry,
           error: [
             extractionError || "LLM returned empty extraction; used heuristic fallback",
             verifiedFallback.error,
@@ -531,6 +559,7 @@ Return ONLY JSON object:
         method: "heuristic",
         extracted_count: verifiedFallback.restaurants.length,
         enriched_count: enrichedFallback.enrichedCount,
+        telemetry,
         error: [
           extractionError || "LLM returned empty extraction; used heuristic fallback",
           verifiedFallback.error,
@@ -545,6 +574,7 @@ Return ONLY JSON object:
       method: "llm",
       extracted_count: 0,
       enriched_count: 0,
+      telemetry,
       error: extractionError || "LLM returned empty extraction",
     };
   } catch (e) {
@@ -563,6 +593,7 @@ Return ONLY JSON object:
         method: "heuristic",
         extracted_count: fallback.length,
         enriched_count: enrichedFallback.enrichedCount,
+        telemetry,
         error: [message, "used heuristic fallback", enrichedFallback.error]
           .filter(Boolean)
           .join("; "),
@@ -573,6 +604,7 @@ Return ONLY JSON object:
       method: "llm",
       extracted_count: 0,
       enriched_count: 0,
+      telemetry,
       error: message,
     };
   }
@@ -582,9 +614,13 @@ async function runRestaurantExtractionAttempt(
   prompt: string,
   key: string,
   articles: ArticleForCuration[],
-  refToId: Map<string, string>
+  refToId: Map<string, string>,
+  telemetry: LlmTelemetry,
+  stageLabel: string
 ): Promise<{ restaurants: ExtractedTrendingRestaurant[]; error?: string }> {
   try {
+    telemetry.llm_calls += 1;
+    telemetry.stages.push(`${stageLabel}:started`);
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -597,16 +633,23 @@ async function runRestaurantExtractionAttempt(
         temperature: 0.1,
       }),
     });
+    const requestId = res.headers.get("x-request-id");
+    if (requestId) telemetry.request_ids.push(requestId);
     if (!res.ok) {
       const text = await res.text();
+      telemetry.stages.push(`${stageLabel}:http_${res.status}`);
       return { restaurants: [], error: `OpenAI ${res.status}: ${text}` };
     }
     const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
     const content = data.choices?.[0]?.message?.content?.trim();
-    if (!content) return { restaurants: [], error: "OpenAI response missing content" };
+    if (!content) {
+      telemetry.stages.push(`${stageLabel}:empty_content`);
+      return { restaurants: [], error: "OpenAI response missing content" };
+    }
 
     const parsedRows = extractRestaurantsFromModelContent(content);
     if (parsedRows.length === 0) {
+      telemetry.stages.push(`${stageLabel}:zero_rows`);
       return { restaurants: [], error: "LLM returned zero restaurant rows" };
     }
 
@@ -634,11 +677,14 @@ async function runRestaurantExtractionAttempt(
     ).slice(0, 15);
 
     if (restaurants.length === 0) {
+      telemetry.stages.push(`${stageLabel}:all_filtered`);
       return { restaurants: [], error: "LLM output rows were not valid restaurants" };
     }
+    telemetry.stages.push(`${stageLabel}:ok_${restaurants.length}`);
     return { restaurants };
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown extraction error";
+    telemetry.stages.push(`${stageLabel}:exception`);
     return { restaurants: [], error: message };
   }
 }
@@ -655,7 +701,8 @@ async function verifyExtractedRestaurantsWithLlm(
   }[],
   key: string,
   refToId: Map<string, string>,
-  idToRef: Map<string, string>
+  idToRef: Map<string, string>,
+  telemetry: LlmTelemetry
 ): Promise<{ restaurants: ExtractedTrendingRestaurant[]; error?: string }> {
   if (rows.length === 0) return { restaurants: [] };
   const context = articleRefs
@@ -695,6 +742,8 @@ Return ONLY JSON object:
 }`;
 
   try {
+    telemetry.llm_calls += 1;
+    telemetry.stages.push("verify:started");
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -707,13 +756,19 @@ Return ONLY JSON object:
         temperature: 0,
       }),
     });
+    const requestId = res.headers.get("x-request-id");
+    if (requestId) telemetry.request_ids.push(requestId);
     if (!res.ok) {
       const text = await res.text();
+      telemetry.stages.push(`verify:http_${res.status}`);
       return { restaurants: rows, error: `Verifier OpenAI ${res.status}: ${text}` };
     }
     const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
     const content = data.choices?.[0]?.message?.content?.trim();
-    if (!content) return { restaurants: rows, error: "Verifier missing content; kept unverified rows" };
+    if (!content) {
+      telemetry.stages.push("verify:empty_content");
+      return { restaurants: rows, error: "Verifier missing content; kept unverified rows" };
+    }
 
     const parsed = extractRestaurantsFromModelContent(content);
     const verified = dedupeRestaurantsByName(
@@ -744,12 +799,15 @@ Return ONLY JSON object:
     ).slice(0, 15);
 
     if (verified.length === 0) {
+      telemetry.stages.push("verify:all_rejected");
       return { restaurants: [], error: "Verifier rejected all candidate rows" };
     }
 
+    telemetry.stages.push(`verify:ok_${verified.length}`);
     return { restaurants: verified };
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown verifier error";
+    telemetry.stages.push("verify:exception");
     return { restaurants: rows, error: `${message}; kept unverified rows` };
   }
 }
