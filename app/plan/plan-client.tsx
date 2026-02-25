@@ -41,6 +41,8 @@ type RecommendResponse = {
     llmRerankUsed: boolean;
     offset: number;
     constraintRelaxed?: boolean;
+    googleLiveEnrichedCount?: number;
+    hasGoogleMapsKey?: boolean;
   };
 };
 
@@ -383,7 +385,7 @@ export function PlanClient({ profile }: Props) {
     setConfidence(data.confidence ?? 0);
     setSourceMode(data.sourceMode ?? "db");
     setRecDebug(
-      `mode=${data.debug.mode} · base=${data.debug.baseCandidateCount} · filtered=${data.debug.filteredCandidateCount} · working=${data.debug.workingCandidateCount} · webAdded=${data.debug.webAdded} · llmRerank=${String(data.debug.llmRerankUsed)} · relaxed=${String(data.debug.constraintRelaxed ?? false)}`
+      `mode=${data.debug.mode} · base=${data.debug.baseCandidateCount} · filtered=${data.debug.filteredCandidateCount} · working=${data.debug.workingCandidateCount} · webAdded=${data.debug.webAdded} · llmRerank=${String(data.debug.llmRerankUsed)} · relaxed=${String(data.debug.constraintRelaxed ?? false)} · googleLive=${data.debug.googleLiveEnrichedCount ?? 0} · hasMapsKey=${String(data.debug.hasGoogleMapsKey ?? false)}`
     );
   };
 

@@ -38,6 +38,11 @@ type Recommendation = {
   ratingSource: string | null;
 };
 
+type GooglePlacesRating = {
+  rating: number | null;
+  source: string | null;
+};
+
 const HARD_DIETARY = new Set([
   "vegetarian",
   "vegan",
@@ -207,6 +212,148 @@ function buildContextualTradeoff(c: Candidate, criteria: PlanCriteria): string {
   }
   if (!c.bookingUrl) return "No direct booking link yet, so availability may take an extra step.";
   return "Popular times may require flexibility on exact seating time.";
+}
+
+function isDenverMetroText(value: string): boolean {
+  const v = normalize(value);
+  if (!v) return false;
+  const allowed = [
+    "denver",
+    "aurora",
+    "lakewood",
+    "englewood",
+    "glendale",
+    "westminster",
+    "arvada",
+    "wheat ridge",
+    "littleton",
+    "centennial",
+    "northglenn",
+    "thornton",
+    "commerce city",
+  ];
+  return allowed.some((city) => v.includes(city));
+}
+
+function placeNameLooksSimilar(a: string, b: string): boolean {
+  const na = normalize(a);
+  const nb = normalize(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  if (na.includes(nb) || nb.includes(na)) return true;
+  const at = new Set(na.split(" ").filter(Boolean));
+  const bt = new Set(nb.split(" ").filter(Boolean));
+  let overlap = 0;
+  for (const t of at) {
+    if (bt.has(t)) overlap += 1;
+  }
+  const min = Math.min(at.size, bt.size);
+  return min > 0 ? overlap / min >= 0.6 : false;
+}
+
+async function fetchGooglePlaceIdForName(name: string, apiKey: string): Promise<string | null> {
+  const endpoint = "https://places.googleapis.com/v1/places:searchText";
+  const queries = [
+    `${name} restaurant Denver Colorado`,
+    `${name} Denver CO`,
+    `${name} Colorado`,
+  ];
+  for (const textQuery of queries) {
+    try {
+      const body = {
+        textQuery,
+        languageCode: "en",
+        maxResultCount: 1,
+        locationBias: {
+          circle: {
+            center: { latitude: 39.7392, longitude: -104.9903 },
+            radius: 50000,
+          },
+        },
+      };
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": apiKey,
+          "X-Goog-FieldMask": "places.id",
+        },
+        body: JSON.stringify(body),
+        cache: "no-store",
+      });
+      if (!res.ok) continue;
+      const data = (await res.json()) as { places?: { id?: string }[] };
+      const placeId = data.places?.[0]?.id ?? null;
+      if (placeId) return placeId;
+    } catch {
+      // continue
+    }
+  }
+  return null;
+}
+
+async function fetchGoogleRatingForPlace(placeId: string, name: string, apiKey: string): Promise<GooglePlacesRating> {
+  try {
+    const endpoint = `https://places.googleapis.com/v1/places/${placeId}`;
+    const res = await fetch(endpoint, {
+      headers: {
+        "X-Goog-Api-Key": apiKey,
+        "X-Goog-FieldMask": "rating,displayName,addressComponents",
+      },
+      cache: "no-store",
+    });
+    if (!res.ok) return { rating: null, source: null };
+    const data = (await res.json()) as {
+      rating?: number;
+      displayName?: { text?: string };
+      addressComponents?: { longText?: string; shortText?: string; types?: string[] }[];
+    };
+    const matchedName = data.displayName?.text ?? "";
+    if (!placeNameLooksSimilar(name, matchedName)) return { rating: null, source: null };
+    const addressParts = (data.addressComponents ?? [])
+      .map((c) => c.longText ?? c.shortText ?? "")
+      .filter(Boolean)
+      .join(" ");
+    if (!isDenverMetroText(addressParts)) return { rating: null, source: null };
+    const rating =
+      typeof data.rating === "number" && Number.isFinite(data.rating) && data.rating >= 0 && data.rating <= 5
+        ? Math.round(data.rating * 10) / 10
+        : null;
+    return { rating, source: rating != null ? "google_live" : null };
+  } catch {
+    return { rating: null, source: null };
+  }
+}
+
+async function enrichRecommendationRatingsWithGooglePlaces(
+  recommendations: Recommendation[]
+): Promise<{ recommendations: Recommendation[]; enrichedCount: number }> {
+  const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+  if (!apiKey) return { recommendations, enrichedCount: 0 };
+  const out: Recommendation[] = [];
+  let enrichedCount = 0;
+  for (const r of recommendations) {
+    if (r.googleRating != null) {
+      out.push(r);
+      continue;
+    }
+    const placeId = await fetchGooglePlaceIdForName(r.name, apiKey);
+    if (!placeId) {
+      out.push(r);
+      continue;
+    }
+    const rating = await fetchGoogleRatingForPlace(placeId, r.name, apiKey);
+    const nextRating = rating.rating ?? r.googleRating;
+    if (r.googleRating == null && nextRating != null) {
+      enrichedCount += 1;
+    }
+    out.push({
+      ...r,
+      googleRating: nextRating,
+      ratingSource: rating.source ?? r.ratingSource,
+    });
+  }
+  return { recommendations: out, enrichedCount };
 }
 
 async function fetchBuzzRatingsByName(names: string[]): Promise<Map<string, { googleRating: number | null; ratingSource: string | null }>> {
@@ -734,6 +881,8 @@ export async function POST(req: NextRequest) {
       ratingSource: rating?.ratingSource ?? null,
     };
   });
+  const placesEnrichment = await enrichRecommendationRatingsWithGooglePlaces(recommendations);
+  recommendations = placesEnrichment.recommendations;
 
   const finalConfidence = confidenceScore(
     recommendations.map((r) => ({
@@ -763,6 +912,8 @@ export async function POST(req: NextRequest) {
       llmRerankUsed: rerank.llmUsed,
       offset,
       constraintRelaxed,
+      googleLiveEnrichedCount: placesEnrichment.enrichedCount,
+      hasGoogleMapsKey: Boolean(process.env.GOOGLE_MAPS_API_KEY),
     },
   });
 }

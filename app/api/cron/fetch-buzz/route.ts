@@ -172,11 +172,28 @@ function hasArticleEvidence(name: string, articleText: string): boolean {
 }
 
 function isSeedEligible(row: TrendingRestaurantRow): boolean {
+  const neighborhood = (row.neighborhood ?? "").toLowerCase();
+  const denverArea = [
+    "denver",
+    "aurora",
+    "lakewood",
+    "englewood",
+    "glendale",
+    "westminster",
+    "arvada",
+    "wheat ridge",
+    "littleton",
+    "centennial",
+    "northglenn",
+    "thornton",
+    "commerce city",
+  ];
+  const isDenverArea = denverArea.some((city) => neighborhood.includes(city));
   return Boolean(
-    row.neighborhood ||
-      (typeof row.price_level === "number" && row.price_level >= 1 && row.price_level <= 4) ||
+    isDenverArea &&
+      ((typeof row.price_level === "number" && row.price_level >= 1 && row.price_level <= 4) ||
       (Array.isArray(row.cuisine_vibes) && row.cuisine_vibes.length > 0) ||
-      (typeof row.google_rating === "number" && row.google_rating >= 0 && row.google_rating <= 5)
+      (typeof row.google_rating === "number" && row.google_rating >= 0 && row.google_rating <= 5))
   );
 }
 

@@ -53,6 +53,7 @@ type LlmTelemetry = {
 };
 
 type GooglePlacesEnrichment = {
+  matched_name: string | null;
   website_url: string | null;
   google_place_id: string | null;
   neighborhood: string | null;
@@ -1232,10 +1233,22 @@ async function enrichWithGooglePlaces(
   if (telemetry) telemetry.stages.push("places:started");
 
   for (const r of restaurants) {
-    const query = `${r.name} restaurant Denver Colorado`;
-    const placeId = await fetchGooglePlaceId(query, apiKey, telemetry);
-    if (!placeId) continue;
-    const details = await fetchGooglePlaceDetails(placeId, apiKey, telemetry);
+    const queries = [
+      `${r.name} restaurant Denver Colorado`,
+      `${r.name} Denver CO`,
+      `${r.name} Colorado`,
+    ];
+    let details: GooglePlacesEnrichment | null = null;
+    for (const query of queries) {
+      const placeId = await fetchGooglePlaceId(query, apiKey, telemetry);
+      if (!placeId) continue;
+      const candidate = await fetchGooglePlaceDetails(placeId, apiKey, telemetry);
+      if (!candidate) continue;
+      if (!isDenverMetroMatch(candidate)) continue;
+      if (!isPlaceNameSimilar(r.name, candidate.matched_name ?? "")) continue;
+      details = candidate;
+      break;
+    }
     if (!details) continue;
     byName.set(normalizeRestaurantName(r.name), details);
   }
@@ -1301,6 +1314,9 @@ async function fetchGooglePlaceDetails(
       id?: string;
       rating?: number;
       websiteUri?: string;
+      displayName?: {
+        text?: string;
+      };
       addressComponents?: {
         longText?: string;
         shortText?: string;
@@ -1311,6 +1327,7 @@ async function fetchGooglePlaceDetails(
       data.addressComponents ?? []
     );
     return {
+      matched_name: data.displayName?.text ?? null,
       website_url: data.websiteUri ?? null,
       google_place_id: data.id ?? null,
       neighborhood,
@@ -1343,4 +1360,42 @@ function extractNeighborhoodFromAddressComponents(
     if (value) return value.slice(0, 120);
   }
   return null;
+}
+
+function isDenverMetroMatch(place: GooglePlacesEnrichment): boolean {
+  const n = (place.neighborhood ?? "").toLowerCase();
+  if (!n) return false;
+  const allowed = [
+    "denver",
+    "aurora",
+    "lakewood",
+    "englewood",
+    "glendale",
+    "westminster",
+    "arvada",
+    "wheat ridge",
+    "littleton",
+    "centennial",
+    "northglenn",
+    "thornton",
+    "commerce city",
+  ];
+  return allowed.some((city) => n.includes(city));
+}
+
+function isPlaceNameSimilar(extractedName: string, matchedName: string): boolean {
+  const a = normalizeRestaurantName(extractedName);
+  const b = normalizeRestaurantName(matchedName);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.includes(b) || b.includes(a)) return true;
+
+  const aTokens = new Set(a.split(" ").filter(Boolean));
+  const bTokens = new Set(b.split(" ").filter(Boolean));
+  let overlap = 0;
+  for (const token of aTokens) {
+    if (bTokens.has(token)) overlap += 1;
+  }
+  const min = Math.min(aTokens.size, bTokens.size);
+  return min > 0 ? overlap / min >= 0.6 : false;
 }

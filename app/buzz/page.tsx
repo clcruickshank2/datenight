@@ -8,6 +8,24 @@ import {
 const CURATED_LIMIT = 5;
 const TRENDING_LIMIT = 15;
 
+function decodeHtmlEntities(input: string): string {
+  return input
+    .replace(/&#(\d+);/g, (_m, dec) => {
+      const code = Number.parseInt(dec, 10);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : _m;
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_m, hex) => {
+      const code = Number.parseInt(hex, 16);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : _m;
+    })
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
 function formatPriceLevel(priceLevel: number | null): string {
   if (priceLevel == null) return "—";
   const n = Math.max(1, Math.min(4, Math.round(priceLevel)));
@@ -70,20 +88,26 @@ export default async function BuzzPage() {
             {articles.map((a) => (
               <li key={a.id} className="card">
                 <div className="flex flex-col gap-2 sm:flex-row sm:gap-4">
-                  {a.image_url && (
-                    <a
-                      href={a.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="shrink-0"
-                    >
+                  <a
+                    href={a.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="shrink-0"
+                  >
+                    {a.image_url ? (
                       <img
                         src={a.image_url}
                         alt=""
                         className="h-24 w-full rounded-lg object-cover sm:h-28 sm:w-40"
                       />
-                    </a>
-                  )}
+                    ) : (
+                      <div className="flex h-24 w-full items-center justify-center rounded-lg bg-gradient-to-br from-slate-100 to-slate-200 px-3 text-center sm:h-28 sm:w-40">
+                        <span className="text-xs font-medium uppercase tracking-wide text-slate-600">
+                          {decodeHtmlEntities(sourceMap.get(a.source_id) ?? a.source_id)}
+                        </span>
+                      </div>
+                    )}
+                  </a>
                   <div className="min-w-0 flex-1">
                     <a
                       href={a.url}
@@ -91,10 +115,10 @@ export default async function BuzzPage() {
                       rel="noopener noreferrer"
                       className="font-medium text-slate-900 hover:text-teal-700 hover:underline"
                     >
-                      {a.title}
+                      {decodeHtmlEntities(a.title)}
                     </a>
                     <div className="mt-1 text-sm text-slate-500">
-                      {sourceMap.get(a.source_id) ?? a.source_id}
+                      {decodeHtmlEntities(sourceMap.get(a.source_id) ?? a.source_id)}
                       {a.published_at && (
                         <>
                           {" · "}
@@ -107,7 +131,9 @@ export default async function BuzzPage() {
                       )}
                     </div>
                     {a.summary && (
-                      <p className="mt-2 line-clamp-2 text-sm text-slate-600">{a.summary}</p>
+                      <p className="mt-2 line-clamp-2 text-sm text-slate-600">
+                        {decodeHtmlEntities(a.summary)}
+                      </p>
                     )}
                   </div>
                 </div>
