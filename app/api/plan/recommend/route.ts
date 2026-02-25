@@ -745,6 +745,7 @@ export async function POST(req: NextRequest) {
       notes: null,
       source: r.source,
       tagsText: "",
+      tags: [],
     })),
     normalizedCriteria
   );
