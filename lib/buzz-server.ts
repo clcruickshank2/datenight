@@ -171,6 +171,80 @@ export async function fetchBuzzRestaurants(limit: number): Promise<BuzzRestauran
   return (await res.json()) as BuzzRestaurant[];
 }
 
+/** Curated article rows (ranked 1..5) for downstream tasks like restaurant extraction. */
+export type CuratedBuzzArticle = {
+  id: string;
+  source_id: string;
+  title: string;
+  summary: string | null;
+  url: string;
+  curated_rank: number;
+};
+
+export async function fetchCuratedBuzzArticles(limit: number): Promise<CuratedBuzzArticle[]> {
+  const { url, key } = getConfig();
+  const path =
+    `${url}/rest/v1/buzz_articles?` +
+    `select=id,source_id,title,summary,url,curated_rank&` +
+    `curated_rank=not.is.null&order=curated_rank.asc&limit=${limit}`;
+  const res = await fetch(path, { headers: headers(key), cache: "no-store" });
+  if (!res.ok) return [];
+  return (await res.json()) as CuratedBuzzArticle[];
+}
+
+/** Clear existing trending rows before inserting fresh weekly extraction. */
+export async function clearBuzzRestaurants(): Promise<{ error?: string }> {
+  const { url, key } = getConfig();
+  // Delete all rows (primary key ids are random and not stable across runs).
+  const res = await fetch(`${url}/rest/v1/buzz_restaurants?id=not.is.null`, {
+    method: "DELETE",
+    headers: {
+      ...headers(key),
+      Prefer: "return=minimal",
+    },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    return { error: `Supabase ${res.status}: ${text}` };
+  }
+  return {};
+}
+
+export async function insertBuzzRestaurants(
+  rows: {
+    name: string;
+    website_url?: string | null;
+    image_url?: string | null;
+    overview?: string | null;
+    google_rating?: number | null;
+    source_article_ids: string[];
+  }[]
+): Promise<{ error?: string }> {
+  if (rows.length === 0) return {};
+  const { url, key } = getConfig();
+  const body = rows.map((r) => ({
+    name: r.name.trim(),
+    website_url: r.website_url ?? null,
+    image_url: r.image_url ?? null,
+    overview: r.overview ?? null,
+    google_rating: r.google_rating ?? null,
+    source_article_ids: r.source_article_ids,
+  }));
+  const res = await fetch(`${url}/rest/v1/buzz_restaurants`, {
+    method: "POST",
+    headers: {
+      ...headers(key),
+      Prefer: "return=minimal",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    return { error: `Supabase ${res.status}: ${text}` };
+  }
+  return {};
+}
+
 /** Profile's enabled source ids for curation. If none, use all enabled source ids. */
 export async function fetchBuzzPreferencesSourceIds(): Promise<string[] | null> {
   const { url, key, profileId } = getConfigWithProfile();

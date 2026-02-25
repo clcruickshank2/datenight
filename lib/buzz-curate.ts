@@ -22,6 +22,15 @@ export type CurationResult = {
   error?: string;
 };
 
+export type TrendingExtractionResult = {
+  restaurants: {
+    name: string;
+    overview: string;
+    source_article_ids: string[];
+  }[];
+  error?: string;
+};
+
 /**
  * Returns 5 article IDs in recommendation order (best first), or [] if no key or error.
  * Uses IDs so we never miss due to URL mismatch; prompt favors editorial sources.
@@ -253,4 +262,94 @@ export function diversifyCuratedArticleIds({
   }
 
   return picks.slice(0, target);
+}
+
+/**
+ * Extract trending restaurants from curated articles using OpenAI.
+ * Returns 0..N rows ready for insert into buzz_restaurants.
+ */
+export async function extractTrendingRestaurants(
+  articles: ArticleForCuration[],
+  sourceNames: Map<string, string>
+): Promise<TrendingExtractionResult> {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) return { restaurants: [], error: "OPENAI_API_KEY missing" };
+  if (articles.length === 0) return { restaurants: [], error: "No curated articles provided" };
+
+  const list = articles.map((a) => ({
+    id: a.id,
+    source: sourceNames.get(a.source_id) ?? a.source_id,
+    title: a.title,
+    summary: (a.summary ?? "").slice(0, 400),
+    url: a.url,
+  }));
+
+  const prompt = `You are extracting trending restaurants from curated Denver food articles.
+
+Input articles (id, source, title, summary, url):
+${list.map((a) => `- id=${a.id} | source=${a.source} | title="${a.title}" | summary="${a.summary}" | url=${a.url}`).join("\n")}
+
+Task:
+- Identify up to 15 restaurants that are explicitly mentioned or strongly implied.
+- Prefer restaurants that appear in multiple articles or are clearly highlighted.
+- For each restaurant, return:
+  - name
+  - overview (max 2 concise sentences)
+  - source_article_ids (array of article IDs from the input where it appears)
+
+Output format:
+Return ONLY valid JSON array of objects:
+[
+  { "name": "...", "overview": "...", "source_article_ids": ["id1","id2"] }
+]`;
+
+  try {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.2,
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      return { restaurants: [], error: `OpenAI ${res.status}: ${text}` };
+    }
+    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    const content = data.choices?.[0]?.message?.content?.trim();
+    if (!content) return { restaurants: [], error: "OpenAI response missing content" };
+
+    const parsed = JSON.parse(content) as {
+      name?: string;
+      overview?: string;
+      source_article_ids?: string[];
+    }[];
+    if (!Array.isArray(parsed)) {
+      return { restaurants: [], error: "OpenAI response was not an array" };
+    }
+
+    const validArticleIds = new Set(articles.map((a) => a.id));
+    const out = parsed
+      .map((r) => ({
+        name: (r.name ?? "").trim(),
+        overview: (r.overview ?? "").trim(),
+        source_article_ids: (r.source_article_ids ?? []).filter((id) => validArticleIds.has(id)),
+      }))
+      .filter((r) => r.name.length > 0)
+      .map((r) => ({
+        name: r.name,
+        overview: r.overview || "Trending restaurant in Denver food coverage.",
+        source_article_ids: r.source_article_ids.length ? r.source_article_ids : [articles[0].id],
+      }));
+
+    return { restaurants: out.slice(0, 15) };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : "Unknown extraction error";
+    return { restaurants: [], error: message };
+  }
 }

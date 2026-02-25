@@ -3,14 +3,18 @@ import {
   fetchBuzzSourcesWithFeeds,
   fetchBuzzSources,
   fetchRecentBuzzArticlesForCuration,
+  fetchCuratedBuzzArticles,
   upsertBuzzArticles,
   clearBuzzCuratedRanks,
   setBuzzCuratedRanksById,
+  clearBuzzRestaurants,
+  insertBuzzRestaurants,
 } from "@/lib/buzz-server";
 import {
   fallbackCuratedArticleIds,
   pickCuratedArticleIds,
   diversifyCuratedArticleIds,
+  extractTrendingRestaurants,
 } from "@/lib/buzz-curate";
 import { parseRss, normalizePubDate } from "@/lib/rss";
 
@@ -147,6 +151,43 @@ export async function GET(request: NextRequest) {
     curationError = "OPENAI_API_KEY missing";
   }
 
+  // Trending restaurant extraction (from curated articles)
+  let trendingInserted = 0;
+  let trendingMethod: "llm" | "none" = "none";
+  let trendingError: string | undefined;
+  if (process.env.OPENAI_API_KEY) {
+    try {
+      const curatedArticles = await fetchCuratedBuzzArticles(5);
+      if (curatedArticles.length > 0) {
+        const allSources = await fetchBuzzSources();
+        const sourceNames = new Map(allSources.map((s) => [s.id, s.name]));
+        const extracted = await extractTrendingRestaurants(curatedArticles, sourceNames);
+        if (extracted.restaurants.length > 0) {
+          const clearErr = await clearBuzzRestaurants();
+          if (clearErr.error) {
+            trendingError = clearErr.error;
+          } else {
+            const insertErr = await insertBuzzRestaurants(extracted.restaurants);
+            if (insertErr.error) {
+              trendingError = insertErr.error;
+            } else {
+              trendingInserted = extracted.restaurants.length;
+              trendingMethod = "llm";
+            }
+          }
+        } else {
+          trendingError = extracted.error ?? "No restaurants extracted from curated articles";
+        }
+      } else {
+        trendingError = "No curated articles found for extraction";
+      }
+    } catch (e) {
+      trendingError = e instanceof Error ? e.message : "Trending extraction error";
+    }
+  } else {
+    trendingError = "OPENAI_API_KEY missing";
+  }
+
   return Response.json({
     ok: true,
     sources: results.length,
@@ -156,6 +197,11 @@ export async function GET(request: NextRequest) {
       method: curationMethod,
       error: curationError ?? null,
       hasOpenAiKey: Boolean(process.env.OPENAI_API_KEY),
+    },
+    trending: {
+      inserted: trendingInserted,
+      method: trendingMethod,
+      error: trendingError ?? null,
     },
   });
 }
