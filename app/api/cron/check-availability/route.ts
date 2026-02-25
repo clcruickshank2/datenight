@@ -35,6 +35,9 @@ function runChecker(restaurant: Restaurant, profile: Profile): Promise<{ success
 
 export async function GET(request: NextRequest) {
   const secret = process.env.CRON_SECRET;
+  if (process.env.NODE_ENV === "production" && !secret) {
+    return Response.json({ error: "CRON_SECRET missing" }, { status: 500 });
+  }
   if (secret) {
     const auth = request.headers.get("authorization");
     if (auth !== `Bearer ${secret}`) {
