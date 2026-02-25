@@ -67,7 +67,11 @@ function parseMessageForCriteria(text: string): Partial<PlanCriteria> {
   // "in the next three weeks", "next 3 weeks", "next two weeks"
   const nextWeeksMatch = lower.match(/\b(?:in the )?next (one|two|three|four|five|1|2|3|4|5)\s*weeks?\b/);
   if (nextWeeksMatch) {
-    const w = { one: 1, two: 2, three: 3, four: 4, five: 5 }[nextWeeksMatch[1] as keyof object] ?? parseInt(nextWeeksMatch[1], 10) || 2;
+    const WORD_TO_NUM = { one: 1, two: 2, three: 3, four: 4, five: 5 } as const;
+    const token = nextWeeksMatch[1]!;
+    const w =
+      (token in WORD_TO_NUM ? WORD_TO_NUM[token as keyof typeof WORD_TO_NUM] : undefined) ??
+      (parseInt(token, 10) || 2);
     const days = Math.min(w * 7, 60);
     out.dateStart = todayStr;
     out.dateEnd = addDays(today, days);
