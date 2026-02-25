@@ -7,7 +7,7 @@ import {
   clearBuzzCuratedRanks,
   setBuzzCuratedRanksById,
 } from "@/lib/buzz-server";
-import { pickCuratedArticleIds } from "@/lib/buzz-curate";
+import { fallbackCuratedArticleIds, pickCuratedArticleIds } from "@/lib/buzz-curate";
 import { parseRss, normalizePubDate } from "@/lib/rss";
 
 export const dynamic = "force-dynamic";
@@ -84,25 +84,55 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  // Curate: have OpenAI pick 5 best articles by id (requires OPENAI_API_KEY)
+  // Curate: pick 5 articles by id (LLM first, deterministic fallback)
   let curated = 0;
+  let curationMethod: "llm" | "fallback" | "none" = "none";
+  let curationError: string | undefined;
   if (process.env.OPENAI_API_KEY) {
     try {
       const recent = await fetchRecentBuzzArticlesForCuration(50);
       if (recent.length >= 5) {
         const allSources = await fetchBuzzSources();
         const sourceNames = new Map(allSources.map((s) => [s.id, s.name]));
-        const ids = await pickCuratedArticleIds(recent, sourceNames);
+        const llm = await pickCuratedArticleIds(recent, sourceNames);
+        let ids = llm.ids;
+        if (ids.length >= 5) {
+          curationMethod = "llm";
+        } else {
+          curationError = llm.error ?? "LLM returned fewer than 5 picks";
+          ids = fallbackCuratedArticleIds(recent, sourceNames);
+          if (ids.length >= 5) curationMethod = "fallback";
+        }
         if (ids.length >= 5) {
           await clearBuzzCuratedRanks();
           const err = await setBuzzCuratedRanksById(ids);
-          if (!err.error) curated = ids.length;
+          if (!err.error) {
+            curated = ids.length;
+          } else if (!curationError) {
+            curationError = err.error;
+          }
+        } else if (!curationError) {
+          curationError = "Not enough candidate articles to curate 5 picks";
         }
+      } else {
+        curationError = "Need at least 5 recent articles before curation";
       }
-    } catch {
-      // Curation is best-effort; don't fail the cron
+    } catch (e) {
+      curationError = e instanceof Error ? e.message : "Curation error";
     }
+  } else {
+    curationError = "OPENAI_API_KEY missing";
   }
 
-  return Response.json({ ok: true, sources: results.length, results, curated });
+  return Response.json({
+    ok: true,
+    sources: results.length,
+    results,
+    curated,
+    curation: {
+      method: curationMethod,
+      error: curationError ?? null,
+      hasOpenAiKey: Boolean(process.env.OPENAI_API_KEY),
+    },
+  });
 }
