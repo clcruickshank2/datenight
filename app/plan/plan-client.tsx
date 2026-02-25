@@ -522,7 +522,7 @@ export function PlanClient({ profile, restaurants }: Props) {
                     rel="noopener noreferrer"
                     className="btn-primary mt-3 inline-block"
                   >
-                    Book ->
+                    Book this table &rarr;
                   </a>
                 ) : (
                   <p className="mt-2 text-sm text-slate-500">No booking link yet.</p>
